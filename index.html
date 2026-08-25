@@ -961,7 +961,7 @@ void main(){
 
 const FS_SOLID = HEAD + FOG + `
 in vec3 vN, vW, vL;
-uniform vec3 uAccent, uGold;
+uniform vec3 uEmit, uGold;
 uniform float uTime, uPulse, uAlpha;
 out vec4 o;
 void main(){
@@ -971,7 +971,7 @@ void main(){
   float facet = 0.55 + 0.45 * abs(dot(N, normalize(vec3(0.35, 0.82, 0.45))));
   vec3 base = vec3(0.010, 0.026, 0.052) * (0.20 + 0.80 * ndv) * facet;
   float band = 0.5 + 0.5 * sin(vL.y * 4.0 + uTime * 0.65);
-  vec3 emit = mix(uAccent, uGold, 0.08 + 0.20 * band);
+  vec3 emit = mix(uEmit, uGold, 0.08 + 0.20 * band);
   float glow = fres * (0.62 + 0.34 * uPulse) * (0.62 + 0.55 * facet);
   vec3 col = base + emit * glow * 1.15;
   float a = clamp(0.18 + fres * 0.55, 0.0, 0.88) * uAlpha;
@@ -1448,7 +1448,18 @@ G.ring1   = beamVAO(ringEdges(2.15, TIER ? 112 : 72, 0.30,  0.10));
 G.ring2   = beamVAO(ringEdges(2.68, TIER ? 120 : 72, -0.52, 0.34));
 G.ring3   = beamVAO(ringEdges(3.20, TIER ? 128 : 64, 0.10, -0.24));
 
-(function () {                                   // flat-shaded inner crystal
+/* interleaved [px,py,pz, nx,ny,nz] triangle soup -> a P.solid-ready VAO */
+function solidVAO(d) {
+  const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+  const vb = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, d, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
+  gl.bindVertexArray(null);
+  return { vao, count: d.length / 6 };
+}
+
+G.solid = (function () {                         // flat-shaded inner crystal
   const n = ICO.faces.length, d = new Float32Array(n * 18);
   let o = 0;
   for (const f of ICO.faces) {
@@ -1458,13 +1469,7 @@ G.ring3   = beamVAO(ringEdges(3.20, TIER ? 128 : 64, 0.10, -0.24));
     const l = Math.hypot(nx, ny, nz) || 1; nx/=l; ny/=l; nz/=l;
     for (const v of [a, b, c]) { d[o++]=v[0]; d[o++]=v[1]; d[o++]=v[2]; d[o++]=nx; d[o++]=ny; d[o++]=nz; }
   }
-  const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
-  const vb = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, vb); gl.bufferData(gl.ARRAY_BUFFER, d, gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 24, 0);
-  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 24, 12);
-  gl.bindVertexArray(null);
-  G.solid = { vao, count: n * 3 };
+  return solidVAO(d);
 })();
 
 G.nodes = spriteVAO(ICO.verts.map((v, i) => ({ c: v, size: 0.30, tint: i % 4 === 0 ? 0.85 : 0.08, alpha: 0.85 })));
@@ -1587,6 +1592,72 @@ const ORBITERS = [
   { type: 2, size: [1.300, 0.867], phase: 4.1888 }
 ];
 const ORDER = [0,1,2].map(() => ({ o: null, pos: [0,0,0], d: 0, roll: 0 }));
+
+/* ------------------------------------------------- authored geometry (GLB)
+   creation_core.glb carries the hero core and its three artifacts as
+   flat-shaded triangle soups (POSITION + NORMAL, no indices, one material
+   each). Reading it takes ~40 lines, so this stays library-free; the
+   procedural solids above render from the first frame and simply get
+   replaced if and when the file lands. Any failure keeps them. */
+const ART_NODES = ["Artifact_tetra", "Artifact_octa", "Artifact_ico"];
+const ART_ORDER = [0, 1, 2];
+
+function parseGLB(buf) {
+  const dv = new DataView(buf);
+  if (dv.getUint32(0, true) !== 0x46546C67) throw new Error("not a glb");
+  if (dv.getUint32(4, true) !== 2)          throw new Error("glb version");
+  let off = 12, json = null, bin = null;
+  while (off + 8 <= buf.byteLength) {                       // walk the chunks
+    const len = dv.getUint32(off, true), type = dv.getUint32(off + 4, true), body = off + 8;
+    if      (type === 0x4E4F534A) json = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, body, len)));
+    else if (type === 0x004E4942) bin  = new Uint8Array(buf, body, len);
+    off = body + len;
+  }
+  if (!json || !bin) throw new Error("glb chunks");
+
+  const vec3 = i => {                        // float VEC3 accessor -> Float32Array
+    const a = json.accessors[i], bv = json.bufferViews[a.bufferView];
+    if (a.componentType !== 5126 || a.type !== "VEC3") throw new Error("accessor " + i);
+    const s = bin.byteOffset + (bv.byteOffset || 0);
+    return new Float32Array(bin.buffer.slice(s, s + a.count * 12));   // copy: keeps alignment
+  };
+  const emitOf = mi => {
+    const m = json.materials[mi] || {};
+    const x = m.extensions && m.extensions.KHR_materials_emissive_strength;
+    return { rgb: m.emissiveFactor || [1, 1, 1], strength: x ? x.emissiveStrength : 1 };
+  };
+
+  const out = {};
+  for (const node of json.nodes) {
+    const mesh = json.meshes[node.mesh], pr = mesh && mesh.primitives[0];
+    if (!pr || (pr.mode !== undefined && pr.mode !== 4)) continue;    // triangles only
+    if (pr.indices !== undefined) throw new Error("indexed primitive");
+    const p = vec3(pr.attributes.POSITION), nn = vec3(pr.attributes.NORMAL);
+    const cnt = p.length / 3, d = new Float32Array(cnt * 6);
+    for (let i = 0; i < cnt; i++) {
+      d[i*6  ] = p[i*3];  d[i*6+1] = p[i*3+1];  d[i*6+2] = p[i*3+2];
+      d[i*6+3] = nn[i*3]; d[i*6+4] = nn[i*3+1]; d[i*6+5] = nn[i*3+2];
+    }
+    out[node.name] = { data: d, pos: node.translation || [0, 0, 0],
+                       scale: (node.scale || [1])[0], mat: emitOf(pr.material) };
+  }
+  return out;
+}
+
+/* Served from the repo root, or with public/ as the web root — try the repo
+   layout first, then the other, and keep whichever answers. */
+(function loadCoreAsset(paths, i) {
+  if (i >= paths.length) return;
+  fetch(paths[i]).then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(r.status)))
+    .then(buf => {
+      const m = parseGLB(buf);
+      const art = ART_NODES.map(k => m[k] && Object.assign(solidVAO(m[k].data),
+        { pos: m[k].pos, scale: m[k].scale, mat: m[k].mat, x: 0, y: 0, z: 0, d: 0 }));
+      if (m.CreationCore) G.solid = solidVAO(m.CreationCore.data);
+      if (art.every(Boolean)) G.art = art;
+    })
+    .catch(() => loadCoreAsset(paths, i + 1));
+})(["public/assets/creation_core.glb", "assets/creation_core.glb"], 0);
 
 /* ============================== render targets =========================== */
 const extF  = gl.getExtension("EXT_color_buffer_float");
@@ -1721,6 +1792,30 @@ function drawCoreSolid(cz, amp, scale) {
   gl.bindVertexArray(G.solid.vao);
   gl.drawArrays(gl.TRIANGLES, 0, G.solid.count);
 }
+/* ---- the three crystal artifacts that ship alongside the core ----
+   Each sits at the offset its own node authors, carried slowly round the
+   core and tumbling on the spot. They ride well off the orbiter plane, so
+   they read as shards around the crystal, not as more product panels. */
+function drawArtifacts(cz, amp, scale) {
+  const u = P.solid.u, yaw = clk * 0.075, cy = Math.cos(yaw), sy = Math.sin(yaw);
+  for (const g of G.art) {                                   // place, then depth-sort
+    g.x = (g.pos[0]*cy + g.pos[2]*sy) * scale;
+    g.y =  g.pos[1] * scale;
+    g.z = (g.pos[2]*cy - g.pos[0]*sy) * scale + cz;
+    g.d = Math.hypot(g.x-cam.p[0], g.y-cam.p[1], g.z-cam.p[2]);
+  }
+  ART_ORDER.sort((a, b) => G.art[b].d - G.art[a].d);
+  for (const i of ART_ORDER) {
+    const g = G.art[i], t = clk * 0.21 + i * 2.0944;
+    M.trs(mMod, g.scale * scale, t * 0.44, t, 0, g.x, g.y, g.z);
+    gl.uniformMatrix4fv(u.uModel, false, mMod);
+    gl.uniform3fv(u.uEmit, g.mat.rgb);                       // the material's own tint
+    gl.uniform1f(u.uAlpha, amp * clamp(g.mat.strength / 4, 0, 1));
+    gl.bindVertexArray(g.vao);
+    gl.drawArrays(gl.TRIANGLES, 0, g.count);
+  }
+  gl.uniform3fv(u.uEmit, ACCENT);                            // hand the pass back
+}
 function drawCoreBeams(cz, amp, scale, pulse) {
   M.trs(mMod, 1.62 * scale, clk * 0.021, clk * 0.058, 0, 0, 0, cz);
   setBeam(G.latOut, mMod, [0.02,0.30,0.52], [0.00,0.95,1.30], 0.72*amp, 0.0030, 0, pulse);
@@ -1781,13 +1876,14 @@ function render(dt) {
   gl.uniformMatrix4fv(P.solid.u.uVP, false, mVP);
   gl.uniform3fv(P.solid.u.uCam, cam.p);
   gl.uniform1f(P.solid.u.uFogD, fogD);
-  gl.uniform3fv(P.solid.u.uAccent, ACCENT);
+  gl.uniform3fv(P.solid.u.uEmit, ACCENT);
   gl.uniform3fv(P.solid.u.uGold, GOLD);
   gl.uniform1f(P.solid.u.uTime, clk);
   gl.uniform1f(P.solid.u.uPulse, pulse);
   gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK);
   if (vCore > 0.01) drawCoreSolid(Z.CORE, vCore * ig, 1);
   if (vSig  > 0.01) drawCoreSolid(Z.SIGNAL, vSig, 1.10);
+  if (vCore > 0.01 && G.art) drawArtifacts(Z.CORE, vCore * ig, 1);
   gl.disable(gl.CULL_FACE);
 
   /* --- opaque: artifact panels (billboards, painter-sorted) --- */
