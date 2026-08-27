@@ -748,9 +748,10 @@ const M = {
    the next layer, plus the occasional longer skip, so the lattice reads as an
    ordered flow rather than a dense tangle.
    ========================================================================== */
+const NET_SPAN_X = 30.0, NET_SPREAD_Y = 11.2, NET_SPREAD_Z = 5.2;
 function buildNetwork() {
   const COUNTS = [6, 8, 9, 10, 9, 8, 7, 7];        // 64 nodes across 8 layers
-  const SPAN_X = 30.0, SPREAD_Y = 11.2, SPREAD_Z = 5.2;
+  const SPAN_X = NET_SPAN_X, SPREAD_Y = NET_SPREAD_Y, SPREAD_Z = NET_SPREAD_Z;
   const nodes = [], layers = [];
   let seed = 20240917 >>> 0;
   const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
@@ -878,7 +879,9 @@ void main(){
   float fire = step(0.60, hash(floor(cyc) + vSeed * 37.0));
   float d    = vT - fract(cyc);
   float trav = exp(-110.0 * d * d) * fire;
-  float df = mix(0.26, 1.0, 1.0 - smoothstep(uNear, uFar, vDepth));   // depth cue
+  float farF   = 1.0 - smoothstep(uNear, uFar, vDepth);      // fades into the distance
+  float flare  = 1.0 - smoothstep(0.0, uNear, vDepth);       // flares as it passes the camera
+  float df = mix(0.22, 1.0, farF) + flare * flare * 0.85;
   vec3 col = uLine * (base * uAlpha * vStr) + uPulse * trav * 1.7;
   o = vec4(col * core * df * uFade, 0.0);           // premultiplied -> additive
 }`;
@@ -916,7 +919,9 @@ void main(){
   if (r > 1.0) discard;
   float halo = pow(1.0 - r, 3.0);
   float core = pow(max(0.0, 1.0 - r * 3.0), 2.0);
-  float df = mix(0.30, 1.0, 1.0 - smoothstep(uNear, uFar, vDepth));
+  float farF  = 1.0 - smoothstep(uNear, uFar, vDepth);
+  float flare = 1.0 - smoothstep(0.0, uNear, vDepth);
+  float df = mix(0.26, 1.0, farF) + flare * flare * 1.05;
   vec3 col = uGlow * halo * 1.10 + uCore * core * 2.30;
   o = vec4(col * (uAlpha * (0.50 + 0.70 * vPulse)) * df * uFade, 0.0);
 }`;
@@ -979,6 +984,7 @@ const FS_COMP = HEAD + `
 in vec2 vUv;
 uniform sampler2D uScene, uBloom;
 uniform float uBloomAmt, uTime, uAspect, uExposure, uVig, uFade;
+uniform float uBlurAmt;
 out vec4 o;
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 vec3 aces(vec3 x){
@@ -992,6 +998,19 @@ void main(){
   sc.r = texture(uScene, vUv + off * ca).r;
   sc.g = texture(uScene, vUv).g;
   sc.b = texture(uScene, vUv - off * ca).b;
+
+  /* cheap radial "flying forward" blur: a few taps stretched toward the
+     screen edges, weighted up only while the camera is actually in motion */
+  if (uBlurAmt > 0.0002) {
+    vec2 step = off * uBlurAmt;
+    vec3 acc = sc; float wsum = 1.0;
+    for (int i = 1; i <= 4; i++) {
+      float w = 1.0 - float(i) / 5.0;
+      acc += texture(uScene, vUv - step * float(i)).rgb * w;
+      wsum += w;
+    }
+    sc = acc / wsum;
+  }
 
   vec3 c = sc + texture(uBloom, vUv).rgb * uBloomAmt;
   c *= uExposure;
@@ -1147,28 +1166,75 @@ const eye = [0, 0, 26], tgt = [0, 0, 0];
 const right = [0,0,0], up = [0,0,0];
 let clk = 0, lastMs = 0, raf = 0;
 let yawS = 0, pitS = 0;                       // smoothed pointer parallax
+let camU = 0, camSpeed = 0, bankAngle = 0;
+
+/* the flight path: one continuous glide down the spine of the lattice, from
+   just outside the input layer to just past the output layer, weaving
+   through the middle layers rather than dollying in a straight line. u runs
+   0..1 across the whole page scroll. */
+const FLIGHT_MARGIN = 8.2, WEAVE_Y = 2.35, WEAVE_Z = 1.7, LOOKAHEAD = 0.045;
+const FLIGHT_X0 = -NET_SPAN_X * 0.5 - FLIGHT_MARGIN, FLIGHT_X1 = NET_SPAN_X * 0.5 + FLIGHT_MARGIN;
+const easeInOut = t => t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+const weaveEnv = u => smoo(u / 0.14) * smoo((1 - u) / 0.14);
+function pathPoint(u, out) {
+  const uc = clamp(u, 0, 1), env = weaveEnv(uc);
+  out[0] = lerp(FLIGHT_X0, FLIGHT_X1, u);
+  out[1] = Math.sin(uc * Math.PI * 2.6 + 0.5) * WEAVE_Y * env;
+  out[2] = Math.cos(uc * Math.PI * 2.15 + 1.7) * WEAVE_Z * env;
+  return out;
+}
+const _pA = [0,0,0], _pB = [0,0,0];
 
 function render(dt) {
   const ig = STATE.ignite;
   const narrow = clamp((1.15 - aspect) / 0.70, 0, 1);
-  const s = STATE.progress;
 
   /* pointer parallax, smoothed, independent of scroll */
   yawS = damp(yawS, STATE.px, 3.2, dt);
   pitS = damp(pitS, STATE.py, 3.2, dt);
 
-  /* scroll orbits the lattice; a slow drift keeps it alive at rest */
-  const yaw = -0.30 + s * 0.62 + Math.sin(clk * 0.050) * 0.045 + yawS * 0.115;
-  const pit =  0.17 - s * 0.22 + Math.sin(clk * 0.037) * 0.028 + pitS * 0.090;
-  const rad = lerp(19.5, 17.4, s) * (1 + narrow * 0.34);
-  tgt[0] = lerp(-1.4, 1.4, s);
-  tgt[1] = lerp( 0.5, -0.5, s);
-  eye[0] = tgt[0] + rad * Math.cos(pit) * Math.sin(yaw);
-  eye[1] = tgt[1] + rad * Math.sin(pit);
-  eye[2] = tgt[2] + rad * Math.cos(pit) * Math.cos(yaw);
+  /* ease the raw scroll fraction, then let the camera catch up with its own
+     slow inertia — this is what keeps the flythrough feeling piloted rather
+     than pinned straight to the scrollbar */
+  const targetU = easeInOut(sat(STATE.progress));
+  let rawSpeed = 0;
+  if (reduced) {
+    camU = targetU;                                        // no self-driven motion
+  } else {
+    if (Math.abs(camU - targetU) > 0.6) camU = targetU;     // tab-return / anchor jump
+    const prevU = camU;
+    camU = damp(camU, targetU, 1.5, dt);
+    rawSpeed = Math.abs(camU - prevU) / Math.max(dt, 1e-4);
+  }
+  camSpeed = damp(camSpeed, rawSpeed, 5.0, dt);
 
-  M.perspective(mProj, lerp(44, 52, narrow) * Math.PI / 180, aspect, 0.1, 160);
-  M.lookAt(mView, eye, tgt, [0, 1, 0]);
+  pathPoint(camU, _pA);
+  pathPoint(camU + LOOKAHEAD, _pB);
+  let fx = _pB[0]-_pA[0], fy = _pB[1]-_pA[1], fz = _pB[2]-_pA[2];
+  const fl = 1 / (Math.hypot(fx, fy, fz) || 1); fx *= fl; fy *= fl; fz *= fl;
+
+  /* bank into the weave like a piloted camera, not a rigid dolly */
+  const dydu = (_pB[1] - _pA[1]) / LOOKAHEAD;
+  const bankTarget = clamp(-dydu * 0.10, -0.30, 0.30);
+  bankAngle = reduced ? bankTarget : damp(bankAngle, bankTarget, 3.0, dt);
+
+  let rx = -fz, ry = 0, rz = fx;                            // right = forward x worldUp
+  const rl = 1 / (Math.hypot(rx, ry, rz) || 1); rx *= rl; ry *= rl; rz *= rl;
+  const ux = ry*fz - rz*fy, uy = rz*fx - rx*fz, uz = rx*fy - ry*fx; // up = right x forward
+  const cb = Math.cos(bankAngle), sb = Math.sin(bankAngle);
+  const rolledUp = [ux*cb + rx*sb, uy*cb + ry*sb, uz*cb + rz*sb];
+
+  /* idle bob keeps the shot alive even at a dead stop, plus a light head-turn
+     from the pointer */
+  const bob = Math.sin(clk * 0.31) * 0.045;
+  eye[0] = _pA[0]; eye[1] = _pA[1] + bob; eye[2] = _pA[2];
+  tgt[0] = _pB[0] + rx * yawS * 1.5 + ux * pitS * 1.2;
+  tgt[1] = _pB[1] + bob + uy * pitS * 1.2 + ry * yawS * 1.5;
+  tgt[2] = _pB[2] + rz * yawS * 1.5 + uz * pitS * 1.2;
+
+  const fovDeg = lerp(58, 70, narrow);
+  M.perspective(mProj, fovDeg * Math.PI / 180, aspect, 0.08, 130);
+  M.lookAt(mView, eye, tgt, rolledUp);
   M.mul(mVP, mProj, mView);
   right[0]=mView[0]; right[1]=mView[4]; right[2]=mView[8];
   up[0]=mView[1];    up[1]=mView[5];    up[2]=mView[9];
@@ -1186,14 +1252,14 @@ function render(dt) {
   gl.useProgram(P.link.p);
   gl.uniformMatrix4fv(P.link.u.uVP, false, mVP);
   gl.uniform1f(P.link.u.uAspect, aspect);
-  gl.uniform1f(P.link.u.uWidth, 0.0021);
+  gl.uniform1f(P.link.u.uWidth, 0.0032);
   gl.uniform1f(P.link.u.uTime, clk);
   gl.uniform3f(P.link.u.uLine, 0.62, 0.72, 0.86);
   gl.uniform3f(P.link.u.uPulse, 0.70, 0.93, 1.20);
-  gl.uniform1f(P.link.u.uAlpha, 0.50);
+  gl.uniform1f(P.link.u.uAlpha, 0.62);
   gl.uniform3fv(P.link.u.uCam, eye);
-  gl.uniform1f(P.link.u.uNear, 11.0);
-  gl.uniform1f(P.link.u.uFar, 34.0);
+  gl.uniform1f(P.link.u.uNear, 2.2);
+  gl.uniform1f(P.link.u.uFar, 25.0);
   gl.uniform1f(P.link.u.uFade, ig);
   gl.bindVertexArray(LINKS.vao);
   gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, LINKS.count);
@@ -1204,13 +1270,13 @@ function render(dt) {
   gl.uniform3fv(P.node.u.uRight, right);
   gl.uniform3fv(P.node.u.uUp, up);
   gl.uniform1f(P.node.u.uTime, clk);
-  gl.uniform1f(P.node.u.uScale, 0.30);
+  gl.uniform1f(P.node.u.uScale, 0.46);
   gl.uniform3f(P.node.u.uCore, 0.86, 0.94, 1.00);
   gl.uniform3f(P.node.u.uGlow, 0.10, 0.62, 1.00);
-  gl.uniform1f(P.node.u.uAlpha, 0.90);
+  gl.uniform1f(P.node.u.uAlpha, 0.95);
   gl.uniform3fv(P.node.u.uCam, eye);
-  gl.uniform1f(P.node.u.uNear, 11.0);
-  gl.uniform1f(P.node.u.uFar, 36.0);
+  gl.uniform1f(P.node.u.uNear, 2.0);
+  gl.uniform1f(P.node.u.uFar, 28.0);
   gl.uniform1f(P.node.u.uFade, ig);
   gl.bindVertexArray(NODES.vao);
   gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, NODES.count);
@@ -1262,6 +1328,7 @@ function render(dt) {
   gl.uniform1f(P.comp.u.uExposure, 1.28);
   gl.uniform1f(P.comp.u.uVig, 0.52);
   gl.uniform1f(P.comp.u.uFade, 1);
+  gl.uniform1f(P.comp.u.uBlurAmt, clamp(camSpeed * 0.028, 0, 0.014));
   blit();
   gl.bindVertexArray(null);
 }
