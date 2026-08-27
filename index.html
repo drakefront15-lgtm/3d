@@ -10,7 +10,8 @@
 <style>
 /* ==========================================================================
    PROMPTWORKS STUDIO
-   One continuous 3D world; five acts; a single scroll-driven camera.
+   Animated node-network background: 64 nodes over 8 layers, instanced
+   filaments, orbiting on scroll behind the page.
    ========================================================================== */
 *,*::before,*::after{box-sizing:border-box}
 html,body,h1,h2,h3,h4,p,figure,ul,li,dl,dd{margin:0;padding:0}
@@ -687,7 +688,7 @@ h1.headline .soft{color:#CBD5E2}
 <script>
 "use strict";
 /* ==========================================================================
-   PROMPTWORKS — one world, five acts, one scroll-driven camera.
+   PROMPTWORKS — animated node lattice behind the whole page.
    Dependency-free WebGL2. No libraries, no network.
    ========================================================================== */
 (function () {
