@@ -61,11 +61,14 @@ body{
    ========================================================================== */
 #gl{
   position:fixed;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;
-  background:linear-gradient(to bottom,#050912 0%,#04070E 52%,#03050A 100%);
+  background:
+    radial-gradient(ellipse 60% 46% at 64% 40%,rgba(0,168,232,.11) 0%,rgba(0,168,232,0) 64%),
+    linear-gradient(to bottom,#0A0F16 0%,#070C12 45%,#05070A 100%);
 }
 #gl.fallback{background:
-  radial-gradient(ellipse 70% 50% at 50% 44%,rgba(0,140,255,.12) 0%,rgba(0,140,255,0) 62%),
-  linear-gradient(to bottom,#050912 0%,#04070E 52%,#03050A 100%)}
+  radial-gradient(ellipse 62% 48% at 64% 40%,rgba(0,168,232,.17) 0%,rgba(0,168,232,0) 64%),
+  radial-gradient(ellipse 28% 20% at 80% 64%,rgba(255,107,53,.05) 0%,rgba(255,107,53,0) 70%),
+  linear-gradient(to bottom,#0A0F16 0%,#070C12 45%,#05070A 100%)}
 
 /* ==========================================================================
    Loader — ignition sequence
@@ -448,7 +451,7 @@ h1.headline .soft{color:#CBD5E2}
 <div id="loader">
   <div class="ld-top"><span class="mi">Promptworks Studio — Booting Renderer</span></div>
   <div class="ld-row">
-    <div class="ld-word">Creation<b>&nbsp;Core</b></div>
+    <div class="ld-word">Fabrication<b>&nbsp;Chamber</b></div>
     <div class="ld-num" id="ldNum">00</div>
   </div>
   <div class="ld-bar"><i id="ldBar"></i></div>
@@ -472,7 +475,7 @@ h1.headline .soft{color:#CBD5E2}
   </div>
 
   <nav class="rail" aria-label="Sections">
-    <button data-go="top"><span class="lbl">01 — Creation Core</span><i class="tick"></i></button>
+    <button data-go="top"><span class="lbl">01 — Fabrication Chamber</span><i class="tick"></i></button>
     <button data-go="build"><span class="lbl">02 — Constellation</span><i class="tick"></i></button>
     <button data-go="work"><span class="lbl">03 — Work Gallery</span><i class="tick"></i></button>
     <button data-go="process"><span class="lbl">04 — The Pipeline</span><i class="tick"></i></button>
@@ -481,7 +484,7 @@ h1.headline .soft{color:#CBD5E2}
 
   <div class="readout">
     <div class="bars"><i></i><i></i><i></i></div>
-    <span class="mi mi--acc" id="actName">Act 01 — Creation Core</span>
+    <span class="mi mi--acc" id="actName">Act 01 — Fabrication Chamber</span>
   </div>
 </div>
 
@@ -803,6 +806,11 @@ const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const coarse  = matchMedia("(pointer: coarse)").matches;
 const small   = Math.min(innerWidth, innerHeight) < 760;
 const TIER    = (coarse || small || (navigator.hardwareConcurrency || 4) <= 4) ? 0 : 1;
+/* the fabrication chamber is a GPU-bound raymarch, not CPU-bound — gate it on
+   touch/phone-scale viewports only. `small` (<760px on the short side) also
+   catches an ordinary un-maximized laptop window, which is too aggressive
+   for hiding the hero's whole centerpiece, so use a tighter floor here. */
+const CH_TIER = (coarse || Math.min(innerWidth, innerHeight) < 560) ? 0 : 1;
 
 /* bridge between the renderer and the page layer */
 const PW = { ok: false };
@@ -810,7 +818,7 @@ const PW = { ok: false };
 /* shared state: the page layer writes, the renderer reads */
 const STATE = {
   progress: 0, act: 0, capActive: -1, workActive: -1,
-  px: 0, py: 0, ignite: 0, ready: false, speed: 0
+  px: 0, py: 0, ignite: 0, ready: false, speed: 0, heroFade: 1
 };
 
 let gl = null;
@@ -981,9 +989,28 @@ uniform sampler2D uScene, uBloom;
 uniform float uBloomAmt, uTime, uAspect, uExposure, uVig, uFade;
 out vec4 o;
 float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-vec3 aces(vec3 x){
-  const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
-  return clamp((x * (a*x + b)) / (x * (c*x + d) + e), 0.0, 1.0);
+/* AgX (minimal approximation) — holds hue on the cyan key and rolls highlights
+   off like film instead of ACES' plasticky push toward electric blue. */
+vec3 agxContrast(vec3 x){
+  vec3 x2 = x*x, x4 = x2*x2;
+  return 15.5*x4*x2 - 40.14*x4*x + 31.96*x4 - 6.868*x2*x + 0.4298*x2 + 0.1191*x - 0.00232;
+}
+vec3 agx(vec3 c){
+  const mat3 m = mat3(
+    0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+    0.0784335999999992, 0.878468636469772,  0.0784336,
+    0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+  const mat3 mInv = mat3(
+    1.19687900512017,  -0.0528968517574562, -0.0529716355144438,
+   -0.0980208811401368,  1.15190312990417,   -0.0980434501171241,
+   -0.0990297440797205, -0.0989611768448433,  1.15107367264116);
+  const float lo = -12.47393, hi = 4.026069;
+  c = max(c, 0.0);
+  c = m * c;
+  c = clamp((log2(max(c, 1e-6)) - lo) / (hi - lo), 0.0, 1.0);
+  c = agxContrast(c);
+  c = mInv * c;
+  return clamp(c, 0.0, 1.0);
 }
 void main(){
   vec2 off = vUv - 0.5;
@@ -995,7 +1022,7 @@ void main(){
 
   vec3 c = sc + texture(uBloom, vUv).rgb * uBloomAmt;
   c *= uExposure;
-  c = aces(c);
+  c = agx(c);
 
   float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
   c += vec3(-0.005, 0.003, 0.018) * (1.0 - lum);      // cool shadows
@@ -1004,6 +1031,199 @@ void main(){
   c *= mix(1.0 - uVig, 1.0, smoothstep(1.04, 0.26, length(q)));
   c += (hash(vUv * vec2(1031.0, 1279.0) + fract(uTime * 0.37)) - 0.5) * 0.016;
   o = vec4(max(c, 0.0) * uFade, 1.0);
+}`;
+
+/* ==========================================================================
+   THE FABRICATION CHAMBER — hero-only raymarched scene
+   A sealed volumetric chamber with a machined object (beveled titanium /
+   anodized / glass panels) that assembles from suspended particulate to
+   ~85% resolution, holds, then disassembles. Fullscreen SDF raymarch, one
+   key (cyan) + one rim (ember) + one bounce light. Fades out via uHeroFade
+   as the page scrolls from the hero into the node-lattice acts below.
+   ========================================================================== */
+const FS_CHAMBER = HEAD + `
+in vec2 vUv;
+uniform vec3 uCamPos, uCamRight, uCamUp, uCamFwd;
+uniform float uAspect, uTanFov, uTime, uHeroFade;
+uniform vec3 uKeyColor, uKeyHot, uEmberColor, uVoidColor, uFogColor;
+uniform vec3 uKeyDir, uRimDir;
+out vec4 o;
+
+float hash11(float p){ p = fract(p*0.1031); p *= p+33.33; p *= p+p; return fract(p); }
+float hash13(vec3 p){ p = fract(p*0.3183099+0.1); p *= 17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
+vec3 hash33(vec3 p){
+  p = vec3(dot(p,vec3(127.1,311.7,74.7)), dot(p,vec3(269.5,183.3,246.1)), dot(p,vec3(113.5,271.9,124.6)));
+  return fract(sin(p)*43758.5453123);
+}
+float vnoise(vec3 p){
+  vec3 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f);
+  float n000=hash13(i+vec3(0,0,0)), n100=hash13(i+vec3(1,0,0));
+  float n010=hash13(i+vec3(0,1,0)), n110=hash13(i+vec3(1,1,0));
+  float n001=hash13(i+vec3(0,0,1)), n101=hash13(i+vec3(1,0,1));
+  float n011=hash13(i+vec3(0,1,1)), n111=hash13(i+vec3(1,1,1));
+  return mix(mix(mix(n000,n100,f.x),mix(n010,n110,f.x),f.y),
+             mix(mix(n001,n101,f.x),mix(n011,n111,f.x),f.y), f.z);
+}
+float sdRoundBox(vec3 p, vec3 b, float r){
+  vec3 q = abs(p) - b + vec3(r);
+  return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0) - r;
+}
+float easeInOutCubic(float x){ return x<0.5 ? 4.0*x*x*x : 1.0-pow(-2.0*x+2.0,3.0)/2.0; }
+/* custom assembly curve: assemble -> hold at 0.85 (never fully resolves) -> disassemble -> pause */
+float computeAssembly(float t){
+  float T = mod(t, 10.0);
+  float raw;
+  if (T < 3.0) raw = easeInOutCubic(T/3.0);
+  else if (T < 5.0) raw = 1.0;
+  else if (T < 7.5) raw = 1.0 - easeInOutCubic((T-5.0)/2.5);
+  else raw = 0.0;
+  return raw * 0.85;
+}
+
+/* half-extents/positions scaled ~0.42x so the assembled device reads as a
+   small suspended object in the chamber, not a close-up wall filling the frame */
+const vec3 PPOS[10] = vec3[10](
+  vec3(0.0,0.0,0.0),      vec3(0.0,0.021,0.101),   vec3(0.0,0.185,0.008),  vec3(0.0,-0.185,0.008),
+  vec3(-0.143,0.042,0.0), vec3(0.143,-0.021,0.0),  vec3(0.0,0.0,-0.101),   vec3(0.008,0.025,0.126),
+  vec3(-0.084,-0.126,0.084), vec3(0.101,0.134,-0.042)
+);
+const vec3 PSIZE[10] = vec3[10](
+  vec3(0.126,0.176,0.092), vec3(0.143,0.126,0.013), vec3(0.118,0.013,0.084), vec3(0.118,0.013,0.084),
+  vec3(0.013,0.126,0.067), vec3(0.013,0.109,0.067), vec3(0.126,0.151,0.013), vec3(0.042,0.042,0.021),
+  vec3(0.038,0.038,0.038), vec3(0.029,0.059,0.029)
+);
+const float PMAT[10]   = float[10](1.0,0.0,0.0,0.0, 0.0,0.0,1.0,2.0, 0.0,1.0);
+const float PROUND[10] = float[10](0.021,0.011,0.008,0.008, 0.006,0.006,0.013,0.008, 0.008,0.008);
+
+vec3 materialColor(float m){
+  if (m < 0.5) return vec3(0.545,0.569,0.600);
+  else if (m < 1.5) return vec3(0.086,0.094,0.106);
+  return vec3(0.10,0.30,0.38);
+}
+float materialRough(float m){ return m<0.5 ? 0.28 : (m<1.5 ? 0.42 : 0.05); }
+
+vec2 mapObject(vec3 p){
+  float bound = length(p) - 0.9;
+  if (bound > 0.05) return vec2(bound, -1.0);
+  vec2 res = vec2(1e5, 0.0);
+  for (int i=0;i<10;i++){
+    float fi = float(i);
+    float aT = computeAssembly(uTime + hash11(fi*13.7)*2.0);
+    vec3 dir = normalize(hash33(vec3(fi,1.7,3.2))*2.0-1.0);
+    float dist0 = 0.20 + hash11(fi*7.13)*0.30;
+    vec3 disp = PPOS[i] + dir*dist0;
+    vec3 lp = p - mix(disp, PPOS[i], aT);
+    float ang = (0.85-aT) * (1.1 + hash11(fi*2.3));
+    float ca = cos(ang), sa = sin(ang);
+    lp.xz = mat2(ca,sa,-sa,ca) * lp.xz;
+    float d = sdRoundBox(lp, PSIZE[i], PROUND[i]);
+    if (d < res.x) res = vec2(d, PMAT[i]);
+  }
+  return res;
+}
+vec3 calcNormal(vec3 p){
+  vec2 e = vec2(0.0015,0.0);
+  return normalize(vec3(
+    mapObject(p+e.xyy).x - mapObject(p-e.xyy).x,
+    mapObject(p+e.yxy).x - mapObject(p-e.yxy).x,
+    mapObject(p+e.yyx).x - mapObject(p-e.yyx).x));
+}
+float fogDensity(vec3 p){
+  float n  = vnoise(p*0.6 + vec3(0.0,uTime*0.05,0.0));
+  float n2 = vnoise(p*1.7 - vec3(uTime*0.03,0.0,0.0));
+  return clamp(0.05 + (n*0.6+n2*0.4-0.5)*0.06, 0.0, 0.14);
+}
+float hgPhase(float c, float g){
+  float g2 = g*g;
+  return (1.0-g2) / (4.0*3.14159265*pow(max(1.0+g2-2.0*g*c,1e-4), 1.5));
+}
+
+void main(){
+  vec2 uv = vUv - 0.5; uv.x *= uAspect;
+  vec3 rd = normalize(uCamFwd + uv.x*uCamRight*uTanFov + uv.y*uCamUp*uTanFov);
+  vec3 ro = uCamPos;
+  vec3 lightDir = normalize(uKeyDir);
+
+  float t = 0.05, transmit = 1.0;
+  vec3 fogAccum = vec3(0.0), surf = vec3(0.0);
+  bool hit = false;
+
+  for (int i=0;i<48;i++){
+    vec3 p = ro + rd*t;
+    vec2 sc = mapObject(p);
+    float dens = fogDensity(p);
+    float ph = hgPhase(dot(rd,lightDir), 0.30);
+    float stepL = max(sc.x, 0.02);
+    float fogL = min(stepL, 0.22);          // cap so a big empty-space skip isn't one giant spike
+    vec3 scat = (uFogColor*2.2 + uKeyColor*0.6) * dens * ph * fogL;
+    fogAccum += scat * transmit;
+    transmit *= exp(-dens * 2.2 * fogL);
+    if (sc.x < 0.0016){
+      hit = true;
+      vec3 N = calcNormal(p);
+      vec3 V = -rd;
+      float ndl = max(dot(N,lightDir),0.0);
+      float rough = materialRough(sc.y);
+      vec3 base = materialColor(sc.y);
+      vec3 H = normalize(lightDir+V);
+      float spec = pow(max(dot(N,H),0.0), mix(90.0,16.0,rough));
+      float fres = pow(1.0-max(dot(N,V),0.0), 3.0);
+      float rimF = max(dot(N,normalize(uRimDir)),0.0) * fres;
+      vec3 diffuse  = base * uKeyColor * (0.18+0.82*ndl);
+      vec3 specular = uKeyColor * spec * (sc.y<0.5 ? 1.4 : 0.5);
+      vec3 rim      = uEmberColor * rimF * 0.9;
+      vec3 fill     = base * uFogColor * 1.8;
+      surf = diffuse + specular + rim + fill;
+      if (sc.y > 1.5) surf = mix(surf, uKeyHot, fres*0.65) + vec3(0.02,-0.01,0.04)*fres*2.0;
+      break;
+    }
+    t += stepL;
+    if (t > 6.0 || transmit < 0.02) break;
+  }
+
+  vec3 col = surf*transmit + fogAccum;
+  if (!hit) col += uVoidColor * 0.4 * (1.0-transmit);
+  col *= uHeroFade;
+  o = vec4(col, 1.0);
+}`;
+
+/* ---- suspended particulate: additive billboards that coalesce inward as
+   the object assembles, and drift back out as it comes apart ---- */
+const VS_DUST = HEAD + `
+layout(location=0) in vec2 aQ;
+layout(location=1) in float iSeed;
+uniform mat4 uVP;
+uniform vec3 uRight, uUp;
+uniform float uTime, uAssembly, uScale;
+out vec2 vUv; out float vAlpha;
+vec3 hash33(vec3 p){
+  p = vec3(dot(p,vec3(127.1,311.7,74.7)), dot(p,vec3(269.5,183.3,246.1)), dot(p,vec3(113.5,271.9,124.6)));
+  return fract(sin(p)*43758.5453123);
+}
+void main(){
+  float s = iSeed;
+  vec3 base = normalize(hash33(vec3(s,s*3.1,s*7.7))*2.0-1.0);
+  float r0 = 0.50 + fract(s*57.31)*0.75;
+  vec3 driftP = base * r0;
+  float tt = uTime*0.15 + s*30.0;
+  driftP += vec3(sin(tt*1.3+s*10.0), cos(tt*1.1+s*7.0), sin(tt*0.9+s*4.0)) * 0.10;
+  float shrink = mix(1.0, 0.30, uAssembly/0.85);
+  vec3 p = driftP * shrink;
+  vec3 w = p + uRight*aQ.x*uScale + uUp*aQ.y*uScale;
+  gl_Position = uVP * vec4(w,1.0);
+  vUv = aQ;
+  vAlpha = 0.35 + 0.65*fract(s*13.7);
+}`;
+
+const FS_DUST = HEAD + `
+in vec2 vUv; in float vAlpha;
+uniform vec3 uColor; uniform float uHeroFade;
+out vec4 o;
+void main(){
+  float r = length(vUv)*2.0;
+  if (r > 1.0) discard;
+  float core = pow(max(0.0,1.0-r),2.2);
+  o = vec4(uColor * core * vAlpha * uHeroFade * 1.4, 0.0);
 }`;
 
 /* =============================== plumbing =============================== */
@@ -1038,6 +1258,11 @@ const P = {
   up:     prog(VS_QUAD, FS_UP),
   comp:   prog(VS_QUAD, FS_COMP)
 };
+if (CH_TIER) {
+  P.chamber = prog(VS_QUAD, FS_CHAMBER);
+  P.dust    = prog(VS_DUST, FS_DUST);
+  if (!P.chamber || !P.dust) { delete P.chamber; delete P.dust; }
+}
 for (const k in P) if (!P[k]) { canvas.classList.add("fallback");
   document.documentElement.classList.add("ready", "nogl"); return; }
 
@@ -1095,6 +1320,21 @@ const NODES = (() => {
   return { vao, count: n };
 })();
 
+/* dust: static random seed per instance, motion computed live in the vertex shader */
+const DUST = P.dust ? (() => {
+  const n = 560;
+  const seed = new Float32Array(n);
+  for (let i = 0; i < n; i++) seed[i] = (i + 0.5) / n;
+  const vao = baseQuad([-0.5,-0.5, 0.5,-0.5, -0.5,0.5, 0.5,0.5]);
+  const b = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, b);
+  gl.bufferData(gl.ARRAY_BUFFER, seed, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 0, 0);
+  gl.vertexAttribDivisor(1, 1);
+  gl.bindVertexArray(null);
+  return { vao, count: n };
+})() : null;
+
 const emptyVAO = gl.createVertexArray();
 
 /* ============================ render targets ============================ */
@@ -1148,6 +1388,16 @@ const right = [0,0,0], up = [0,0,0];
 let clk = 0, lastMs = 0, raf = 0;
 let yawS = 0, pitS = 0;                       // smoothed pointer parallax
 
+/* -------------------------- fabrication chamber -------------------------- */
+const mProj2 = M.create(), mView2 = M.create(), mVP2 = M.create();
+const chEye = [0,0,2.55], chTgt = [-0.30, 0.05, 0];
+const chRight = [0,0,0], chUp = [0,0,0], chFwd = [0,0,0];
+const KEY_DIR  = [-0.62, 0.55, 0.35], RIM_DIR = [0.55, -0.15, -0.60];
+const KEY_COL  = [0, 0.6588, 0.9098], KEY_HOT = [0.4980, 0.8588, 1.0];
+const EMBER_COL = [1.0, 0.4196, 0.2078];
+const VOID_COL = [0.0196, 0.0275, 0.0392], FOG_COL = [0.0471, 0.0745, 0.0980];
+const CH_FOV_TAN = Math.tan(46 * Math.PI / 360);
+
 function render(dt) {
   const ig = STATE.ignite;
   const narrow = clamp((1.15 - aspect) / 0.70, 0, 1);
@@ -1176,27 +1426,96 @@ function render(dt) {
   /* ------------------------------ scene ------------------------------ */
   gl.bindFramebuffer(gl.FRAMEBUFFER, T.scene.fb);
   gl.viewport(0, 0, VW, VH);
-  gl.clearColor(0.008, 0.013, 0.024, 1);
+  gl.clearColor(0.0196, 0.0275, 0.0392, 1);
   gl.clear(gl.COLOR_BUFFER_BIT);
-  gl.disable(gl.DEPTH_TEST);                 // everything here is additive
+  gl.disable(gl.DEPTH_TEST);
+
+  /* ------------------------- fabrication chamber ---------------------- */
+  const heroFade = STATE.heroFade || 0;
+  const netAlpha = 1 - heroFade;              // node-lattice fades in as the chamber fades out
+  if (P.chamber && heroFade > 0.012) {
+    const chTime = reduced ? 4.0 : clk;
+    const driftAmp = reduced ? 0 : 1;
+    const dolly = 1 - heroFade;               // camera creeps toward the object across the hero scroll
+    chEye[0] = (Math.sin(chTime*0.15)*0.03 + Math.sin(chTime*0.371+1.3)*0.02) * driftAmp + yawS*0.05;
+    chEye[1] = 0.05 + (Math.sin(chTime*0.13+2.1)*0.025 + Math.sin(chTime*0.29)*0.015) * driftAmp + pitS*0.04;
+    chEye[2] = 3.05 - dolly*0.55;
+    chTgt[0] = -0.30 + yawS*0.10;
+    chTgt[1] =  0.05 + pitS*0.08;
+    chTgt[2] = 0;
+    M.lookAt(mView2, chEye, chTgt, [0,1,0]);
+    M.perspective(mProj2, 46*Math.PI/180, aspect, 0.05, 8);
+    M.mul(mVP2, mProj2, mView2);
+    chRight[0]=mView2[0]; chRight[1]=mView2[4]; chRight[2]=mView2[8];
+    chUp[0]=mView2[1];    chUp[1]=mView2[5];    chUp[2]=mView2[9];
+    const fl = Math.hypot(chTgt[0]-chEye[0], chTgt[1]-chEye[1], chTgt[2]-chEye[2]) || 1;
+    chFwd[0]=(chTgt[0]-chEye[0])/fl; chFwd[1]=(chTgt[1]-chEye[1])/fl; chFwd[2]=(chTgt[2]-chEye[2])/fl;
+
+    gl.disable(gl.BLEND);
+    gl.useProgram(P.chamber.p);
+    gl.uniform3fv(P.chamber.u.uCamPos, chEye);
+    gl.uniform3fv(P.chamber.u.uCamRight, chRight);
+    gl.uniform3fv(P.chamber.u.uCamUp, chUp);
+    gl.uniform3fv(P.chamber.u.uCamFwd, chFwd);
+    gl.uniform1f(P.chamber.u.uAspect, aspect);
+    gl.uniform1f(P.chamber.u.uTanFov, CH_FOV_TAN);
+    gl.uniform1f(P.chamber.u.uTime, chTime);
+    gl.uniform1f(P.chamber.u.uHeroFade, heroFade);
+    gl.uniform3fv(P.chamber.u.uKeyColor, KEY_COL);
+    gl.uniform3fv(P.chamber.u.uKeyHot, KEY_HOT);
+    gl.uniform3fv(P.chamber.u.uEmberColor, EMBER_COL);
+    gl.uniform3fv(P.chamber.u.uVoidColor, VOID_COL);
+    gl.uniform3fv(P.chamber.u.uFogColor, FOG_COL);
+    gl.uniform3fv(P.chamber.u.uKeyDir, KEY_DIR);
+    gl.uniform3fv(P.chamber.u.uRimDir, RIM_DIR);
+    gl.bindVertexArray(emptyVAO);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    if (DUST) {
+      const assembly = reduced ? 0.85 :
+        (() => { const T0 = chTime % 10;
+          if (T0 < 3.0) return (T0/3.0<0.5?4*(T0/3.0)**3:1-Math.pow(-2*(T0/3.0)+2,3)/2) * 0.85;
+          if (T0 < 5.0) return 0.85;
+          if (T0 < 7.5) { const u=(T0-5.0)/2.5; return (1-(u<0.5?4*u*u*u:1-Math.pow(-2*u+2,3)/2)) * 0.85; }
+          return 0;
+        })();
+      gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+      gl.useProgram(P.dust.p);
+      gl.uniformMatrix4fv(P.dust.u.uVP, false, mVP2);
+      gl.uniform3fv(P.dust.u.uRight, chRight);
+      gl.uniform3fv(P.dust.u.uUp, chUp);
+      gl.uniform1f(P.dust.u.uTime, chTime);
+      gl.uniform1f(P.dust.u.uAssembly, assembly);
+      gl.uniform1f(P.dust.u.uScale, 0.010);
+      gl.uniform3f(P.dust.u.uColor, 0.66, 0.68, 0.71);
+      gl.uniform1f(P.dust.u.uHeroFade, heroFade);
+      gl.bindVertexArray(DUST.vao);
+      gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, DUST.count);
+    }
+  }
+
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
-  /* connections — one instanced draw call */
-  gl.useProgram(P.link.p);
-  gl.uniformMatrix4fv(P.link.u.uVP, false, mVP);
-  gl.uniform1f(P.link.u.uAspect, aspect);
-  gl.uniform1f(P.link.u.uWidth, 0.0021);
-  gl.uniform1f(P.link.u.uTime, clk);
-  gl.uniform3f(P.link.u.uLine, 0.62, 0.72, 0.86);
-  gl.uniform3f(P.link.u.uPulse, 0.70, 0.93, 1.20);
-  gl.uniform1f(P.link.u.uAlpha, 0.50);
-  gl.uniform3fv(P.link.u.uCam, eye);
-  gl.uniform1f(P.link.u.uNear, 11.0);
-  gl.uniform1f(P.link.u.uFar, 34.0);
-  gl.uniform1f(P.link.u.uFade, ig);
-  gl.bindVertexArray(LINKS.vao);
-  gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, LINKS.count);
+  /* connections — one instanced draw call (skipped while the chamber owns the
+     frame: FS_LINK's travelling pulse isn't scaled by uAlpha, so a 0 alpha
+     alone wouldn't fully silence it — the draw call itself has to drop) */
+  if (netAlpha > 0.02) {
+    gl.useProgram(P.link.p);
+    gl.uniformMatrix4fv(P.link.u.uVP, false, mVP);
+    gl.uniform1f(P.link.u.uAspect, aspect);
+    gl.uniform1f(P.link.u.uWidth, 0.0021);
+    gl.uniform1f(P.link.u.uTime, clk);
+    gl.uniform3f(P.link.u.uLine, 0.62, 0.72, 0.86);
+    gl.uniform3f(P.link.u.uPulse, 0.70, 0.93, 1.20);
+    gl.uniform1f(P.link.u.uAlpha, 0.50 * netAlpha);
+    gl.uniform3fv(P.link.u.uCam, eye);
+    gl.uniform1f(P.link.u.uNear, 11.0);
+    gl.uniform1f(P.link.u.uFar, 34.0);
+    gl.uniform1f(P.link.u.uFade, ig);
+    gl.bindVertexArray(LINKS.vao);
+    gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, LINKS.count);
+  }
 
   /* nodes — one instanced draw call */
   gl.useProgram(P.node.p);
@@ -1207,7 +1526,7 @@ function render(dt) {
   gl.uniform1f(P.node.u.uScale, 0.30);
   gl.uniform3f(P.node.u.uCore, 0.86, 0.94, 1.00);
   gl.uniform3f(P.node.u.uGlow, 0.10, 0.62, 1.00);
-  gl.uniform1f(P.node.u.uAlpha, 0.90);
+  gl.uniform1f(P.node.u.uAlpha, 0.90 * netAlpha);
   gl.uniform3fv(P.node.u.uCam, eye);
   gl.uniform1f(P.node.u.uNear, 11.0);
   gl.uniform1f(P.node.u.uFar, 36.0);
@@ -1312,7 +1631,7 @@ const sections = {
   process: document.getElementById("process"),
   contact: document.getElementById("contact")
 };
-const ACTS = ["Act 01 — Creation Core", "Act 02 — Constellation", "Act 03 — Work Gallery",
+const ACTS = ["Act 01 — Fabrication Chamber", "Act 02 — Constellation", "Act 03 — Work Gallery",
               "Act 04 — The Pipeline", "Act 05 — Signal"];
 const actName = document.getElementById("actName");
 
@@ -1369,6 +1688,7 @@ function applyScroll(dt) {
   } else smoothY = targetY;
 
   STATE.progress = clamp(smoothY / maxScroll, 0, 1);
+  STATE.heroFade = clamp(1 - smoothY / (innerHeight * 1.05), 0, 1);
 
   /* reveals */
   const trig = smoothY + innerHeight * 0.86;
