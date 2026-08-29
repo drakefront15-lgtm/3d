@@ -807,10 +807,12 @@ const coarse  = matchMedia("(pointer: coarse)").matches;
 const small   = Math.min(innerWidth, innerHeight) < 760;
 const TIER    = (coarse || small || (navigator.hardwareConcurrency || 4) <= 4) ? 0 : 1;
 /* the fabrication chamber is a GPU-bound raymarch, not CPU-bound — gate it on
-   touch/phone-scale viewports only. `small` (<760px on the short side) also
-   catches an ordinary un-maximized laptop window, which is too aggressive
-   for hiding the hero's whole centerpiece, so use a tighter floor here. */
-const CH_TIER = (coarse || Math.min(innerWidth, innerHeight) < 560) ? 0 : 1;
+   phone-scale viewports only. Deliberately NOT keyed on `coarse`: several
+   embedding hosts (iframed previews included) report pointer:coarse on an
+   ordinary desktop for touch/mouse normalization, which would hide the
+   hero's whole centerpiece on hardware that runs it fine. Viewport size is
+   the more reliable signal for whether this is actually a phone. */
+const CH_TIER = Math.min(innerWidth, innerHeight) < 560 ? 0 : 1;
 
 /* bridge between the renderer and the page layer */
 const PW = { ok: false };
@@ -828,6 +830,13 @@ try {
     powerPreference: "high-performance", preserveDrawingBuffer: false
   });
 } catch (e) { gl = null; }
+if (!gl) {
+  /* some sandboxed/virtualized GPU contexts (embedded previews included)
+     reject the power-preference hint outright — retry with plain defaults
+     before giving up and falling back to the static CSS gradient */
+  try { gl = canvas.getContext("webgl2", { alpha: false, depth: true, stencil: false }); }
+  catch (e) { gl = null; }
+}
 
 if (!gl) { canvas.classList.add("fallback"); document.documentElement.classList.add("ready", "nogl"); }
 else { world(gl); }
