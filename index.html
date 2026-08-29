@@ -11,7 +11,9 @@
 /* ==========================================================================
    PROMPTWORKS STUDIO
    Animated node-network background: 64 nodes over 8 layers, instanced
-   filaments, orbiting on scroll behind the page.
+   filaments. Scroll flies the camera the length of the network -
+   input layer to output layer, like a forward pass - and it reacts
+   live to pointer position, scroll speed and clicks.
    ========================================================================== */
 *,*::before,*::after{box-sizing:border-box}
 html,body,h1,h2,h3,h4,p,figure,ul,li,dl,dd{margin:0;padding:0}
@@ -797,6 +799,22 @@ function buildNetwork() {
   return { nodes, links };
 }
 
+/* a sparse, dim field of far-away points behind the lattice, purely for
+   parallax depth - same draw call and shader as the nodes, tiny and dim. */
+function buildDust(count) {
+  let seed = 733109 >>> 0;
+  const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
+  const pts = [];
+  for (let i = 0; i < count; i++) {
+    pts.push({
+      p: [(rnd() - 0.5) * 50, (rnd() - 0.5) * 24, (rnd() - 0.5) * 40 - 4],
+      seed: rnd(),
+      size: 0.10 + rnd() * 0.20
+    });
+  }
+  return pts;
+}
+
 /* --------------------------------------------------------- context/tier */
 const canvas = document.getElementById("gl");
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -810,7 +828,8 @@ const PW = { ok: false };
 /* shared state: the page layer writes, the renderer reads */
 const STATE = {
   progress: 0, act: 0, capActive: -1, workActive: -1,
-  px: 0, py: 0, ignite: 0, ready: false, speed: 0
+  px: 0, py: 0, ignite: 0, ready: false, speed: 0,
+  pointerOn: false, burstSeq: 0
 };
 
 let gl = null;
@@ -842,7 +861,8 @@ layout(location=3) in vec2 iMeta;     // seed, strength
 uniform mat4 uVP;
 uniform vec3 uCam;
 uniform float uAspect, uWidth, uTime;
-out float vT, vSide, vSeed, vStr, vDepth;
+uniform vec2 uPointer;
+out float vT, vSide, vSeed, vStr, vDepth, vProx, vLayerX;
 void main(){
   vec3 a = iP0, b = iP1;
   a.y += sin(uTime * 0.32 + iMeta.x * 24.0) * 0.09;
@@ -855,32 +875,43 @@ void main(){
   vec2 dir = length(d) > 1e-6 ? normalize(d) : vec2(1.0, 0.0);
   vec2 nn = vec2(-dir.y, dir.x);
   vec4 c = mix(c0, c1, aQ.y);
+  vec2 sMid = mix(s0, s1, aQ.y);
   vec2 off = nn * uWidth * aQ.x; off.x /= uAspect;
   c.xy += off * c.w;
   gl_Position = c;
   vT = aQ.y; vSide = aQ.x; vSeed = iMeta.x; vStr = iMeta.y;
-  vDepth = length(mix(a, b, aQ.y) - uCam);
+  vec3 mid = mix(a, b, aQ.y);
+  vDepth = length(mid - uCam);
+  vLayerX = clamp((mid.x + 15.0) / 30.0, -0.3, 1.3);
+  vProx = 1.0 - smoothstep(0.0, 0.40, length(sMid - vec2(uPointer.x * uAspect, uPointer.y)));
 }`;
 
 const FS_LINK = HEAD + `
-in float vT, vSide, vSeed, vStr, vDepth;
+in float vT, vSide, vSeed, vStr, vDepth, vProx, vLayerX;
 uniform vec3 uLine, uPulse;
-uniform float uTime, uAlpha, uFade, uNear, uFar;
+uniform float uTime, uAlpha, uFade, uNear, uFar, uFlow, uBurst;
 out vec4 o;
 float hash(float n){ return fract(sin(n * 127.1) * 43758.5453); }
 void main(){
   float core = exp(-3.6 * vSide * vSide);           // soft cross-section
+  float coreTrav = exp(-1.5 * vSide * vSide);       // the travelling pulse runs fatter
   /* filaments read brighter close to the nodes they touch */
   float ends = smoothstep(0.44, 0.0, vT) + smoothstep(0.56, 1.0, vT);
   float base = 0.40 + 0.60 * ends;
   /* light travels the filament now and then, not all at once */
-  float cyc  = uTime * 0.17 + vSeed * 11.0;
+  float cyc  = uTime * uFlow + vSeed * 11.0;
   float fire = step(0.60, hash(floor(cyc) + vSeed * 37.0));
   float d    = vT - fract(cyc);
   float trav = exp(-110.0 * d * d) * fire;
   float df = mix(0.26, 1.0, 1.0 - smoothstep(uNear, uFar, vDepth));   // depth cue
-  vec3 col = uLine * (base * uAlpha * vStr) + uPulse * trav * 1.7;
-  o = vec4(col * core * df * uFade, 0.0);           // premultiplied -> additive
+  /* a forward-pass wavefront sweeps layer to layer on click */
+  float bd = vLayerX - uBurst;
+  float burst = exp(-42.0 * bd * bd);
+  vec3 col = uLine * (base * uAlpha * vStr) * core
+           + uPulse * trav * 1.7 * coreTrav
+           + uPulse * vProx * 0.55 * core
+           + uPulse * burst * 2.0 * core;
+  o = vec4(col * df * uFade, 0.0);                  // premultiplied -> additive
 }`;
 
 /* ------------------------------------------------------------- nodes ---- */
@@ -891,7 +922,8 @@ layout(location=2) in vec2 iMeta;     // seed, size
 uniform mat4 uVP;
 uniform vec3 uRight, uUp, uCam;
 uniform float uTime, uScale;
-out vec2 vUv; out float vPulse, vDepth;
+uniform vec2 uPointer;
+out vec2 vUv; out float vPulse, vDepth, vProx, vLayerX;
 void main(){
   float ph = iMeta.x * 6.2831;
   float pulse = 0.60 + 0.40 * sin(uTime * 1.15 + ph) + 0.16 * sin(uTime * 0.43 + ph * 2.1);
@@ -899,25 +931,37 @@ void main(){
   vec3 p = iP;
   p.y += sin(uTime * 0.32 + iMeta.x * 24.0) * 0.09;
   p.z += cos(uTime * 0.26 + ph) * 0.07;
-  float s = iMeta.y * uScale * (0.86 + 0.26 * pulse);
+  float dist = length(p - uCam);
+  /* exaggerate the near/far contrast beyond plain perspective falloff */
+  float sizeBoost = clamp(1.0 + (13.0 - dist) * 0.05, 0.55, 1.6);
+  float s = iMeta.y * uScale * (0.86 + 0.26 * pulse) * sizeBoost;
   vec3 w = p + uRight * (aQ.x * s) + uUp * (aQ.y * s);
   gl_Position = uVP * vec4(w, 1.0);
   vUv = aQ;
-  vDepth = length(p - uCam);
+  vDepth = dist;
+  vLayerX = clamp((iP.x + 15.0) / 30.0, -0.3, 1.3);
+  vec2 ndc = gl_Position.xy / max(gl_Position.w, 1e-4);
+  vProx = 1.0 - smoothstep(0.0, 0.34, length(ndc - uPointer));
 }`;
 
 const FS_NODE = HEAD + `
-in vec2 vUv; in float vPulse, vDepth;
+in vec2 vUv; in float vPulse, vDepth, vProx, vLayerX;
 uniform vec3 uCore, uGlow;
-uniform float uAlpha, uFade, uNear, uFar;
+uniform float uAlpha, uFade, uNear, uFar, uBurst;
 out vec4 o;
 void main(){
   float r = length(vUv) * 2.0;
   if (r > 1.0) discard;
+  /* treat the billboard as a lit sphere impostor, not a flat gradient */
+  vec3 n = vec3(vUv * 2.0, 0.0);
+  n.z = sqrt(max(0.0, 1.0 - dot(n.xy, n.xy)));
+  float lit = max(dot(n, normalize(vec3(-0.45, 0.62, 0.65))), 0.0);
   float halo = pow(1.0 - r, 3.0);
-  float core = pow(max(0.0, 1.0 - r * 3.0), 2.0);
+  float core = pow(max(0.0, 1.0 - r * 3.0), 2.0) * (0.55 + 0.75 * lit);
   float df = mix(0.30, 1.0, 1.0 - smoothstep(uNear, uFar, vDepth));
-  vec3 col = uGlow * halo * 1.10 + uCore * core * 2.30;
+  float bd = vLayerX - uBurst;
+  float burst = exp(-42.0 * bd * bd);
+  vec3 col = uGlow * halo * 1.10 + uCore * core * 2.30 + uGlow * vProx * 0.85 + uCore * burst * 1.4;
   o = vec4(col * (uAlpha * (0.50 + 0.70 * vPulse)) * df * uFade, 0.0);
 }`;
 
@@ -1095,6 +1139,21 @@ const NODES = (() => {
   return { vao, count: n };
 })();
 
+/* dust: same program/geometry as nodes, a sparser and dimmer far field */
+const DUST = (() => {
+  const pts = buildDust(TIER ? 240 : 130);
+  const n = pts.length;
+  const pos = new Float32Array(n * 3), meta = new Float32Array(n * 2);
+  pts.forEach((v, i) => {
+    pos[i*3] = v.p[0]; pos[i*3+1] = v.p[1]; pos[i*3+2] = v.p[2];
+    meta[i*2] = v.seed; meta[i*2+1] = v.size;
+  });
+  const vao = baseQuad([-0.5,-0.5, 0.5,-0.5, -0.5,0.5, 0.5,0.5]);
+  instanceAttrib(1, pos, 3); instanceAttrib(2, meta, 2);
+  gl.bindVertexArray(null);
+  return { vao, count: n };
+})();
+
 const emptyVAO = gl.createVertexArray();
 
 /* ============================ render targets ============================ */
@@ -1147,31 +1206,58 @@ const eye = [0, 0, 26], tgt = [0, 0, 0];
 const right = [0,0,0], up = [0,0,0];
 let clk = 0, lastMs = 0, raf = 0;
 let yawS = 0, pitS = 0;                       // smoothed pointer parallax
+let burstStart = -999, lastBurstSeq = 0;      // click-triggered forward-pass wavefront
+const BURST_DUR = 1.35;
 
 function render(dt) {
   const ig = STATE.ignite;
   const narrow = clamp((1.15 - aspect) / 0.70, 0, 1);
   const s = STATE.progress;
+  const speed = STATE.speed;                  // signed, damped scroll velocity, -1..1
 
   /* pointer parallax, smoothed, independent of scroll */
   yawS = damp(yawS, STATE.px, 3.2, dt);
   pitS = damp(pitS, STATE.py, 3.2, dt);
 
-  /* scroll orbits the lattice; a slow drift keeps it alive at rest */
-  const yaw = -0.30 + s * 0.62 + Math.sin(clk * 0.050) * 0.045 + yawS * 0.115;
-  const pit =  0.17 - s * 0.22 + Math.sin(clk * 0.037) * 0.028 + pitS * 0.090;
-  const rad = lerp(19.5, 17.4, s) * (1 + narrow * 0.34);
-  tgt[0] = lerp(-1.4, 1.4, s);
+  /* the camera flies the length of the network as you scroll — input layer
+     (s=0) to output layer (s=1) — narrowing in tight through the hidden
+     middle and widening out again at both ends for an establishing view. */
+  const weave = 1 - Math.sin(Math.PI * clamp(s, 0, 1));
+  const yaw = -0.16 + s * 0.34 + Math.sin(clk * 0.050) * 0.045 + yawS * 0.115;
+  const pit =  0.14 - s * 0.16 + Math.sin(clk * 0.037) * 0.028 + pitS * 0.090;
+  const rad = lerp(10.5, 19.0, weave) * (1 + narrow * 0.34);
+  tgt[0] = lerp(-13, 13, s);
   tgt[1] = lerp( 0.5, -0.5, s);
   eye[0] = tgt[0] + rad * Math.cos(pit) * Math.sin(yaw);
   eye[1] = tgt[1] + rad * Math.sin(pit);
   eye[2] = tgt[2] + rad * Math.cos(pit) * Math.cos(yaw);
 
+  /* banking into fast scrolls sells the sense of accelerating through it */
+  const bank = clamp(speed, -1, 1) * 0.14;
+  const bankUp = [Math.sin(bank), Math.cos(bank), 0];
+
   M.perspective(mProj, lerp(44, 52, narrow) * Math.PI / 180, aspect, 0.1, 160);
-  M.lookAt(mView, eye, tgt, [0, 1, 0]);
+  M.lookAt(mView, eye, tgt, bankUp);
   M.mul(mVP, mProj, mView);
   right[0]=mView[0]; right[1]=mView[4]; right[2]=mView[8];
   up[0]=mView[1];    up[1]=mView[5];    up[2]=mView[9];
+
+  /* the depth-fade band tracks the camera's current distance from the
+     lattice, so whatever layer isn't currently framed falls into the dark
+     instead of the whole 30-unit span being crammed into one fixed band */
+  const near = rad * 0.60, far = rad * 2.15;
+
+  /* pointer proximity glow — off entirely with no active pointer */
+  const pointerActive = !reduced && STATE.pointerOn;
+  const ptrX = pointerActive ? STATE.px : 9, ptrY = pointerActive ? STATE.py : 9;
+
+  /* a forward-pass wavefront sweeps input -> output on every click/tap */
+  if (STATE.burstSeq !== lastBurstSeq) { lastBurstSeq = STATE.burstSeq; burstStart = clk; }
+  const bt = clk - burstStart;
+  const burstOn = !reduced && bt >= 0 && bt <= BURST_DUR;
+  const burstPos = burstOn ? -0.15 + 1.3 * (bt / BURST_DUR) : -999;
+
+  const flow = 0.17 + Math.abs(speed) * 0.55;
 
   /* ------------------------------ scene ------------------------------ */
   gl.bindFramebuffer(gl.FRAMEBUFFER, T.scene.fb);
@@ -1182,18 +1268,40 @@ function render(dt) {
   gl.enable(gl.BLEND);
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
+  /* dust — same program as nodes, dimmer and far behind, for parallax depth */
+  gl.useProgram(P.node.p);
+  gl.uniformMatrix4fv(P.node.u.uVP, false, mVP);
+  gl.uniform3fv(P.node.u.uRight, right);
+  gl.uniform3fv(P.node.u.uUp, up);
+  gl.uniform1f(P.node.u.uTime, clk);
+  gl.uniform1f(P.node.u.uScale, 0.30);
+  gl.uniform3f(P.node.u.uCore, 0.60, 0.70, 0.82);
+  gl.uniform3f(P.node.u.uGlow, 0.08, 0.30, 0.52);
+  gl.uniform1f(P.node.u.uAlpha, 0.28);
+  gl.uniform3fv(P.node.u.uCam, eye);
+  gl.uniform2f(P.node.u.uPointer, ptrX, ptrY);
+  gl.uniform1f(P.node.u.uBurst, -999);
+  gl.uniform1f(P.node.u.uNear, near * 0.7);
+  gl.uniform1f(P.node.u.uFar, far * 2.0);
+  gl.uniform1f(P.node.u.uFade, ig);
+  gl.bindVertexArray(DUST.vao);
+  gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, DUST.count);
+
   /* connections — one instanced draw call */
   gl.useProgram(P.link.p);
   gl.uniformMatrix4fv(P.link.u.uVP, false, mVP);
   gl.uniform1f(P.link.u.uAspect, aspect);
   gl.uniform1f(P.link.u.uWidth, 0.0021);
   gl.uniform1f(P.link.u.uTime, clk);
+  gl.uniform1f(P.link.u.uFlow, flow);
   gl.uniform3f(P.link.u.uLine, 0.62, 0.72, 0.86);
   gl.uniform3f(P.link.u.uPulse, 0.70, 0.93, 1.20);
   gl.uniform1f(P.link.u.uAlpha, 0.50);
   gl.uniform3fv(P.link.u.uCam, eye);
-  gl.uniform1f(P.link.u.uNear, 11.0);
-  gl.uniform1f(P.link.u.uFar, 34.0);
+  gl.uniform2f(P.link.u.uPointer, ptrX, ptrY);
+  gl.uniform1f(P.link.u.uBurst, burstPos);
+  gl.uniform1f(P.link.u.uNear, near);
+  gl.uniform1f(P.link.u.uFar, far);
   gl.uniform1f(P.link.u.uFade, ig);
   gl.bindVertexArray(LINKS.vao);
   gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, LINKS.count);
@@ -1209,8 +1317,10 @@ function render(dt) {
   gl.uniform3f(P.node.u.uGlow, 0.10, 0.62, 1.00);
   gl.uniform1f(P.node.u.uAlpha, 0.90);
   gl.uniform3fv(P.node.u.uCam, eye);
-  gl.uniform1f(P.node.u.uNear, 11.0);
-  gl.uniform1f(P.node.u.uFar, 36.0);
+  gl.uniform2f(P.node.u.uPointer, ptrX, ptrY);
+  gl.uniform1f(P.node.u.uBurst, burstPos);
+  gl.uniform1f(P.node.u.uNear, near);
+  gl.uniform1f(P.node.u.uFar, far);
   gl.uniform1f(P.node.u.uFade, ig);
   gl.bindVertexArray(NODES.vao);
   gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, NODES.count);
@@ -1299,7 +1409,7 @@ const ldBar    = document.getElementById("ldBar");
 const SMOOTH = !reduced && !coarse;
 if (SMOOTH) scroller.classList.add("smooth");
 
-let smoothY = 0, targetY = 0, maxScroll = 1;
+let smoothY = 0, targetY = 0, maxScroll = 1, prevSmoothY = 0;
 const caps  = [...document.querySelectorAll(".cap")];
 const works = [...document.querySelectorAll(".work")];
 const steps = [...document.querySelectorAll(".step")];
@@ -1367,6 +1477,12 @@ function applyScroll(dt) {
     if (Math.abs(smoothY - targetY) < 0.15) smoothY = targetY;
     scroller.style.transform = "translate3d(0," + (-smoothY).toFixed(2) + "px,0)";
   } else smoothY = targetY;
+
+  /* signed, damped scroll velocity — feeds the background's camera bank
+     and its link "flow rate" so it visibly reacts to how the user scrolls */
+  const rawSpeed = (smoothY - prevSmoothY) / Math.max(dt, 1 / 240);
+  prevSmoothY = smoothY;
+  STATE.speed = damp(STATE.speed, clamp(rawSpeed / 2200, -1, 1), 6, dt);
 
   STATE.progress = clamp(smoothY / maxScroll, 0, 1);
 
@@ -1462,10 +1578,12 @@ if (!coarse) {
     mx = e.clientX; my = e.clientY;
     STATE.px = clamp((mx / innerWidth) * 2 - 1, -1, 1);
     STATE.py = clamp(-((my / innerHeight) * 2 - 1), -1, 1) * 0.8;
+    STATE.pointerOn = true;
     cur.classList.add("on"); curDot.classList.add("on");
   }, { passive: true });
   addEventListener("pointerleave", () => {
-    STATE.px = 0; STATE.py = 0; cur.classList.remove("on"); curDot.classList.remove("on");
+    STATE.px = 0; STATE.py = 0; STATE.pointerOn = false;
+    cur.classList.remove("on"); curDot.classList.remove("on");
   }, { passive: true });
 
   const hot = "a, button, .cap, .work, .cat, .step";
@@ -1476,6 +1594,10 @@ if (!coarse) {
     if (e.target.closest && e.target.closest(hot)) cur.classList.remove("hot");
   });
 }
+
+/* a click/tap fires a forward-pass wavefront through the background —
+   direct, physical feedback that the network is "live" under the page */
+addEventListener("pointerdown", () => { if (!reduced) STATE.burstSeq++; }, { passive: true });
 
 /* magnetic buttons */
 const magnets = [...document.querySelectorAll("[data-magnet]")];
