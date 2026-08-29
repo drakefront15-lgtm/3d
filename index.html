@@ -10,8 +10,7 @@
 <style>
 /* ==========================================================================
    PROMPTWORKS STUDIO
-   Animated node-network background: 64 nodes over 8 layers, instanced
-   filaments, orbiting on scroll behind the page.
+   Earth globe background (Three.js), orbiting on scroll behind the page.
    ========================================================================== */
 *,*::before,*::after{box-sizing:border-box}
 html,body,h1,h2,h3,h4,p,figure,ul,li,dl,dd{margin:0;padding:0}
@@ -685,11 +684,17 @@ h1.headline .soft{color:#CBD5E2}
 </div>
 <div id="spacer"></div>
 
-<script>
-"use strict";
+<script type="importmap">
+{ "imports": {
+  "three": "./vendor/three/three.module.min.js"
+} }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "./vendor/three/loaders/GLTFLoader.js";
+import { DRACOLoader } from "./vendor/three/loaders/DRACOLoader.js";
 /* ==========================================================================
-   PROMPTWORKS — animated node lattice behind the whole page.
-   Dependency-free WebGL2. No libraries, no network.
+   PROMPTWORKS — Earth globe behind the whole page, rendered with Three.js.
    ========================================================================== */
 (function () {
 
@@ -699,103 +704,6 @@ const lerp  = (a, b, t) => a + (b - a) * t;
 const sat   = v => v < 0 ? 0 : v > 1 ? 1 : v;
 const smoo  = t => (t = sat(t), t * t * (3 - 2 * t));
 const damp  = (a, b, l, dt) => lerp(a, b, 1 - Math.exp(-l * dt));
-
-const M = {
-  create() { return new Float32Array(16); },
-  perspective(o, fovy, asp, near, far) {
-    const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
-    o.fill(0); o[0] = f / asp; o[5] = f; o[11] = -1;
-    o[10] = (far + near) * nf; o[14] = 2 * far * near * nf; return o;
-  },
-  mul(o, a, b) {
-    for (let c = 0; c < 4; c++) {
-      const b0 = b[c * 4], b1 = b[c * 4 + 1], b2 = b[c * 4 + 2], b3 = b[c * 4 + 3];
-      o[c * 4]     = a[0] * b0 + a[4] * b1 + a[8]  * b2 + a[12] * b3;
-      o[c * 4 + 1] = a[1] * b0 + a[5] * b1 + a[9]  * b2 + a[13] * b3;
-      o[c * 4 + 2] = a[2] * b0 + a[6] * b1 + a[10] * b2 + a[14] * b3;
-      o[c * 4 + 3] = a[3] * b0 + a[7] * b1 + a[11] * b2 + a[15] * b3;
-    }
-    return o;
-  },
-  lookAt(o, e, t, up) {
-    let fx = t[0] - e[0], fy = t[1] - e[1], fz = t[2] - e[2];
-    let rl = 1 / (Math.hypot(fx, fy, fz) || 1); fx *= rl; fy *= rl; fz *= rl;
-    let sx = fy * up[2] - fz * up[1], sy = fz * up[0] - fx * up[2], sz = fx * up[1] - fy * up[0];
-    rl = 1 / (Math.hypot(sx, sy, sz) || 1); sx *= rl; sy *= rl; sz *= rl;
-    const ux = sy * fz - sz * fy, uy = sz * fx - sx * fz, uz = sx * fy - sy * fx;
-    o[0] = sx; o[4] = sy; o[8] = sz;    o[12] = -(sx * e[0] + sy * e[1] + sz * e[2]);
-    o[1] = ux; o[5] = uy; o[9] = uz;    o[13] = -(ux * e[0] + uy * e[1] + uz * e[2]);
-    o[2] = -fx; o[6] = -fy; o[10] = -fz; o[14] = fx * e[0] + fy * e[1] + fz * e[2];
-    o[3] = o[7] = o[11] = 0; o[15] = 1; return o;
-  },
-  /* scale -> rotY -> rotX -> rotZ -> translate */
-  trs(o, sc, rx, ry, rz, tx, ty, tz) {
-    const cx = Math.cos(rx), sx = Math.sin(rx), cy = Math.cos(ry), sy = Math.sin(ry),
-          cz = Math.cos(rz), sz = Math.sin(rz);
-    const m00 = cz * cy + sz * sx * sy, m01 = -sz * cx, m02 = -cz * sy + sz * sx * cy;
-    const m10 = sz * cy - cz * sx * sy, m11 =  cz * cx, m12 = -sz * sy - cz * sx * cy;
-    const m20 = cx * sy,                m21 =  sx,      m22 =  cx * cy;
-    o[0] = m00 * sc; o[1] = m10 * sc; o[2]  = m20 * sc; o[3]  = 0;
-    o[4] = m01 * sc; o[5] = m11 * sc; o[6]  = m21 * sc; o[7]  = 0;
-    o[8] = m02 * sc; o[9] = m12 * sc; o[10] = m22 * sc; o[11] = 0;
-    o[12] = tx; o[13] = ty; o[14] = tz; o[15] = 1; return o;
-  }
-};
-
-/* ==========================================================================
-   The node network
-   8 layers left-to-right. Every node links to its 2-3 nearest neighbours in
-   the next layer, plus the occasional longer skip, so the lattice reads as an
-   ordered flow rather than a dense tangle.
-   ========================================================================== */
-function buildNetwork() {
-  const COUNTS = [6, 8, 9, 10, 9, 8, 7, 7];        // 64 nodes across 8 layers
-  const SPAN_X = 30.0, SPREAD_Y = 11.2, SPREAD_Z = 5.2;
-  const nodes = [], layers = [];
-  let seed = 20240917 >>> 0;
-  const rnd = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0) / 4294967296;
-  const d2 = (a, b) => {
-    const x = a[0]-b[0], y = a[1]-b[1], z = a[2]-b[2];
-    return x*x + y*y + z*z;
-  };
-
-  COUNTS.forEach((n, li) => {
-    const x = -SPAN_X * 0.5 + (li / (COUNTS.length - 1)) * SPAN_X;
-    const ids = [];
-    for (let i = 0; i < n; i++) {
-      const t = n === 1 ? 0.5 : i / (n - 1);
-      ids.push(nodes.length);
-      nodes.push({
-        p: [x + (rnd() - 0.5) * 1.1,
-            (t - 0.5) * SPREAD_Y + (rnd() - 0.5) * 1.2,
-            (rnd() - 0.5) * SPREAD_Z],
-        seed: rnd(),
-        size: 0.80 + rnd() * 0.75
-      });
-    }
-    layers.push(ids);
-  });
-
-  const nearest = (from, pool, k) => pool
-    .map(id => ({ id, d: d2(nodes[from].p, nodes[id].p) }))
-    .sort((a, b) => a.d - b.d).slice(0, k).map(o => o.id);
-
-  const links = [];
-  for (let li = 0; li < layers.length - 1; li++) {
-    for (const a of layers[li]) {
-      const k = 2 + (rnd() < 0.45 ? 1 : 0);
-      for (const b of nearest(a, layers[li + 1], k)) links.push([a, b, rnd(), 1.0]);
-    }
-    if (li < layers.length - 2) {                  // the occasional skip connection
-      const hops = 1 + (rnd() < 0.5 ? 1 : 0);
-      for (let h = 0; h < hops; h++) {
-        const a = layers[li][(rnd() * layers[li].length) | 0];
-        links.push([a, nearest(a, layers[li + 2], 1)[0], rnd(), 0.5]);
-      }
-    }
-  }
-  return { nodes, links };
-}
 
 /* --------------------------------------------------------- context/tier */
 const canvas = document.getElementById("gl");
@@ -813,318 +721,61 @@ const STATE = {
   px: 0, py: 0, ignite: 0, ready: false, speed: 0
 };
 
-let gl = null;
+let renderer = null;
 try {
-  gl = canvas.getContext("webgl2", {
-    alpha: false, antialias: false, depth: true, stencil: false,
+  renderer = new THREE.WebGLRenderer({
+    canvas, alpha: true, antialias: true,
     powerPreference: "high-performance", preserveDrawingBuffer: false
   });
-} catch (e) { gl = null; }
+} catch (e) { renderer = null; }
 
-if (!gl) { canvas.classList.add("fallback"); document.documentElement.classList.add("ready", "nogl"); }
-else { world(gl); }
+if (!renderer) { canvas.classList.add("fallback"); document.documentElement.classList.add("ready", "nogl"); }
+else { world(renderer); }
 
-function world(gl) {
+function world(renderer) {
 
-const HEAD = `#version 300 es
-precision highp float;
-`;
+renderer.setClearColor(0x000000, 0);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
 
-/* ---------------------------------------------------- connecting lines --- */
-/* One unit quad, instanced once per link. Each instance carries its two
-   endpoints; the quad is expanded in screen space so lines keep a real,
-   constant width (gl.LINES is capped at 1px on most platforms). */
-const VS_LINK = HEAD + `
-layout(location=0) in vec2 aQ;        // x: side(-1|1)   y: t(0|1)
-layout(location=1) in vec3 iP0;
-layout(location=2) in vec3 iP1;
-layout(location=3) in vec2 iMeta;     // seed, strength
-uniform mat4 uVP;
-uniform vec3 uCam;
-uniform float uAspect, uWidth, uTime;
-out float vT, vSide, vSeed, vStr, vDepth;
-void main(){
-  vec3 a = iP0, b = iP1;
-  a.y += sin(uTime * 0.32 + iMeta.x * 24.0) * 0.09;
-  b.y += sin(uTime * 0.32 + iMeta.x * 24.0 + 1.7) * 0.09;
-  vec4 c0 = uVP * vec4(a, 1.0);
-  vec4 c1 = uVP * vec4(b, 1.0);
-  vec2 s0 = c0.xy / max(c0.w, 1e-4); s0.x *= uAspect;
-  vec2 s1 = c1.xy / max(c1.w, 1e-4); s1.x *= uAspect;
-  vec2 d = s1 - s0;
-  vec2 dir = length(d) > 1e-6 ? normalize(d) : vec2(1.0, 0.0);
-  vec2 nn = vec2(-dir.y, dir.x);
-  vec4 c = mix(c0, c1, aQ.y);
-  vec2 off = nn * uWidth * aQ.x; off.x /= uAspect;
-  c.xy += off * c.w;
-  gl_Position = c;
-  vT = aQ.y; vSide = aQ.x; vSeed = iMeta.x; vStr = iMeta.y;
-  vDepth = length(mix(a, b, aQ.y) - uCam);
-}`;
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(48, 1, 0.1, 160);
 
-const FS_LINK = HEAD + `
-in float vT, vSide, vSeed, vStr, vDepth;
-uniform vec3 uLine, uPulse;
-uniform float uTime, uAlpha, uFade, uNear, uFar;
-out vec4 o;
-float hash(float n){ return fract(sin(n * 127.1) * 43758.5453); }
-void main(){
-  float core = exp(-3.6 * vSide * vSide);           // soft cross-section
-  /* filaments read brighter close to the nodes they touch */
-  float ends = smoothstep(0.44, 0.0, vT) + smoothstep(0.56, 1.0, vT);
-  float base = 0.40 + 0.60 * ends;
-  /* light travels the filament now and then, not all at once */
-  float cyc  = uTime * 0.17 + vSeed * 11.0;
-  float fire = step(0.60, hash(floor(cyc) + vSeed * 37.0));
-  float d    = vT - fract(cyc);
-  float trav = exp(-110.0 * d * d) * fire;
-  float df = mix(0.26, 1.0, 1.0 - smoothstep(uNear, uFar, vDepth));   // depth cue
-  vec3 col = uLine * (base * uAlpha * vStr) + uPulse * trav * 1.7;
-  o = vec4(col * core * df * uFade, 0.0);           // premultiplied -> additive
-}`;
+/* ------------------------------------------------------------- lights --- */
+const hemi = new THREE.HemisphereLight(0x6fa8ff, 0x03050a, 0.5);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight(0xffffff, 2.6);
+sun.position.set(6, 3, 6);
+scene.add(sun);
+const rim = new THREE.DirectionalLight(0x2fa7ff, 1.1);
+rim.position.set(-7, -2, -5);
+scene.add(rim);
 
-/* ------------------------------------------------------------- nodes ---- */
-const VS_NODE = HEAD + `
-layout(location=0) in vec2 aQ;        // corner, -0.5..0.5
-layout(location=1) in vec3 iP;
-layout(location=2) in vec2 iMeta;     // seed, size
-uniform mat4 uVP;
-uniform vec3 uRight, uUp, uCam;
-uniform float uTime, uScale;
-out vec2 vUv; out float vPulse, vDepth;
-void main(){
-  float ph = iMeta.x * 6.2831;
-  float pulse = 0.60 + 0.40 * sin(uTime * 1.15 + ph) + 0.16 * sin(uTime * 0.43 + ph * 2.1);
-  vPulse = pulse;
-  vec3 p = iP;
-  p.y += sin(uTime * 0.32 + iMeta.x * 24.0) * 0.09;
-  p.z += cos(uTime * 0.26 + ph) * 0.07;
-  float s = iMeta.y * uScale * (0.86 + 0.26 * pulse);
-  vec3 w = p + uRight * (aQ.x * s) + uUp * (aQ.y * s);
-  gl_Position = uVP * vec4(w, 1.0);
-  vUv = aQ;
-  vDepth = length(p - uCam);
-}`;
+/* ---------------------------------------------------------- the globe --- */
+const globe = new THREE.Group();
+globe.scale.setScalar(0.001);          // grows in on ignite
+scene.add(globe);
 
-const FS_NODE = HEAD + `
-in vec2 vUv; in float vPulse, vDepth;
-uniform vec3 uCore, uGlow;
-uniform float uAlpha, uFade, uNear, uFar;
-out vec4 o;
-void main(){
-  float r = length(vUv) * 2.0;
-  if (r > 1.0) discard;
-  float halo = pow(1.0 - r, 3.0);
-  float core = pow(max(0.0, 1.0 - r * 3.0), 2.0);
-  float df = mix(0.30, 1.0, 1.0 - smoothstep(uNear, uFar, vDepth));
-  vec3 col = uGlow * halo * 1.10 + uCore * core * 2.30;
-  o = vec4(col * (uAlpha * (0.50 + 0.70 * vPulse)) * df * uFade, 0.0);
-}`;
+const draco = new DRACOLoader();
+draco.setDecoderPath("./vendor/three/draco/");
+const gltfLoader = new GLTFLoader();
+gltfLoader.setDRACOLoader(draco);
+let modelReady = false;
+gltfLoader.load("./assets/earth.glb", (gltf) => {
+  const model = gltf.scene;
+  const box = new THREE.Box3().setFromObject(model);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  model.position.sub(center);
+  const scale = 9.6 / Math.max(size.x, size.y, size.z);
+  model.scale.setScalar(scale);
+  globe.add(model);
+  modelReady = true;
+}, undefined, (err) => console.error("earth.glb failed to load", err));
 
-/* ------------------------------------------------------------- post ----- */
-const VS_QUAD = HEAD + `
-out vec2 vUv;
-void main(){
-  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-  vUv = p; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
-}`;
-
-const FS_BRIGHT = HEAD + `
-in vec2 vUv; uniform sampler2D uTex; uniform vec2 uTexel; uniform float uThresh;
-out vec4 o;
-void main(){
-  vec3 c = texture(uTex, vUv).rgb;
-  c += texture(uTex, vUv + vec2( uTexel.x,  uTexel.y)).rgb;
-  c += texture(uTex, vUv + vec2(-uTexel.x,  uTexel.y)).rgb;
-  c += texture(uTex, vUv + vec2( uTexel.x, -uTexel.y)).rgb;
-  c += texture(uTex, vUv + vec2(-uTexel.x, -uTexel.y)).rgb;
-  c *= 0.2;
-  float l = max(max(c.r, c.g), c.b);
-  o = vec4(c * (max(l - uThresh, 0.0) / max(l, 1e-4)), 1.0);
-}`;
-
-const FS_DOWN = HEAD + `
-in vec2 vUv; uniform sampler2D uTex; uniform vec2 uTexel;
-out vec4 o;
-void main(){
-  vec2 t = uTexel;
-  vec3 a = texture(uTex, vUv + vec2(-2, 2)*t).rgb, b = texture(uTex, vUv + vec2(0, 2)*t).rgb;
-  vec3 c = texture(uTex, vUv + vec2( 2, 2)*t).rgb, d = texture(uTex, vUv + vec2(-2, 0)*t).rgb;
-  vec3 e = texture(uTex, vUv).rgb,                 f = texture(uTex, vUv + vec2( 2, 0)*t).rgb;
-  vec3 g = texture(uTex, vUv + vec2(-2,-2)*t).rgb, h = texture(uTex, vUv + vec2(0,-2)*t).rgb;
-  vec3 i = texture(uTex, vUv + vec2( 2,-2)*t).rgb, j = texture(uTex, vUv + vec2(-1, 1)*t).rgb;
-  vec3 k = texture(uTex, vUv + vec2( 1, 1)*t).rgb, l = texture(uTex, vUv + vec2(-1,-1)*t).rgb;
-  vec3 m = texture(uTex, vUv + vec2( 1,-1)*t).rgb;
-  o = vec4(e*0.125 + (a+c+g+i)*0.03125 + (b+d+f+h)*0.0625 + (j+k+l+m)*0.125, 1.0);
-}`;
-
-const FS_UP = HEAD + `
-in vec2 vUv; uniform sampler2D uTex; uniform vec2 uTexel; uniform float uRadius;
-out vec4 o;
-void main(){
-  vec2 t = uTexel * uRadius;
-  vec3 s = texture(uTex, vUv + vec2(-1, 1)*t).rgb * 1.0
-         + texture(uTex, vUv + vec2( 0, 1)*t).rgb * 2.0
-         + texture(uTex, vUv + vec2( 1, 1)*t).rgb * 1.0
-         + texture(uTex, vUv + vec2(-1, 0)*t).rgb * 2.0
-         + texture(uTex, vUv).rgb                 * 4.0
-         + texture(uTex, vUv + vec2( 1, 0)*t).rgb * 2.0
-         + texture(uTex, vUv + vec2(-1,-1)*t).rgb * 1.0
-         + texture(uTex, vUv + vec2( 0,-1)*t).rgb * 2.0
-         + texture(uTex, vUv + vec2( 1,-1)*t).rgb * 1.0;
-  o = vec4(s / 16.0, 1.0);
-}`;
-
-const FS_COMP = HEAD + `
-in vec2 vUv;
-uniform sampler2D uScene, uBloom;
-uniform float uBloomAmt, uTime, uAspect, uExposure, uVig, uFade;
-out vec4 o;
-float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-vec3 aces(vec3 x){
-  const float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
-  return clamp((x * (a*x + b)) / (x * (c*x + d) + e), 0.0, 1.0);
-}
-void main(){
-  vec2 off = vUv - 0.5;
-  float ca = 0.00045 * dot(off, off) * 4.0;
-  vec3 sc;
-  sc.r = texture(uScene, vUv + off * ca).r;
-  sc.g = texture(uScene, vUv).g;
-  sc.b = texture(uScene, vUv - off * ca).b;
-
-  vec3 c = sc + texture(uBloom, vUv).rgb * uBloomAmt;
-  c *= uExposure;
-  c = aces(c);
-
-  float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
-  c += vec3(-0.005, 0.003, 0.018) * (1.0 - lum);      // cool shadows
-
-  vec2 q = off; q.x *= uAspect;
-  c *= mix(1.0 - uVig, 1.0, smoothstep(1.04, 0.26, length(q)));
-  c += (hash(vUv * vec2(1031.0, 1279.0) + fract(uTime * 0.37)) - 0.5) * 0.016;
-  o = vec4(max(c, 0.0) * uFade, 1.0);
-}`;
-
-/* =============================== plumbing =============================== */
-function compile(type, src) {
-  const s = gl.createShader(type);
-  gl.shaderSource(s, src); gl.compileShader(s);
-  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-    console.error(gl.getShaderInfoLog(s)); gl.deleteShader(s); return null;
-  }
-  return s;
-}
-function prog(vsS, fsS) {
-  const vs = compile(gl.VERTEX_SHADER, vsS), fs = compile(gl.FRAGMENT_SHADER, fsS);
-  if (!vs || !fs) return null;
-  const p = gl.createProgram();
-  gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
-  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(p)); return null; }
-  gl.deleteShader(vs); gl.deleteShader(fs);
-  const u = {}, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
-  for (let i = 0; i < n; i++) {
-    const info = gl.getActiveUniform(p, i);
-    u[info.name.replace("[0]", "")] = gl.getUniformLocation(p, info.name);
-  }
-  return { p, u };
-}
-
-const P = {
-  link:   prog(VS_LINK, FS_LINK),
-  node:   prog(VS_NODE, FS_NODE),
-  bright: prog(VS_QUAD, FS_BRIGHT),
-  down:   prog(VS_QUAD, FS_DOWN),
-  up:     prog(VS_QUAD, FS_UP),
-  comp:   prog(VS_QUAD, FS_COMP)
-};
-for (const k in P) if (!P[k]) { canvas.classList.add("fallback");
-  document.documentElement.classList.add("ready", "nogl"); return; }
-
-/* ========================= instanced geometry =========================== */
-const NET = buildNetwork();
-
-/* one quad + one index buffer, shared by both instanced draws */
-function baseQuad(corners) {
-  const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
-  const vb = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(corners), gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 8, 0);
-  const ib = gl.createBuffer();
-  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib);
-  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0,1,2, 2,1,3]), gl.STATIC_DRAW);
-  return vao;
-}
-function instanceAttrib(loc, data, size) {
-  const b = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, b);
-  gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(loc);
-  gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0);
-  gl.vertexAttribDivisor(loc, 1);                 // one value per instance
-}
-
-/* links: side/t quad, instanced once per connection */
-const LINKS = (() => {
-  const n = NET.links.length;
-  const p0 = new Float32Array(n * 3), p1 = new Float32Array(n * 3), meta = new Float32Array(n * 2);
-  NET.links.forEach((l, i) => {
-    const a = NET.nodes[l[0]].p, b = NET.nodes[l[1]].p;
-    p0[i*3] = a[0]; p0[i*3+1] = a[1]; p0[i*3+2] = a[2];
-    p1[i*3] = b[0]; p1[i*3+1] = b[1]; p1[i*3+2] = b[2];
-    meta[i*2] = l[2]; meta[i*2+1] = l[3];
-  });
-  const vao = baseQuad([-1,0, 1,0, -1,1, 1,1]);
-  instanceAttrib(1, p0, 3); instanceAttrib(2, p1, 3); instanceAttrib(3, meta, 2);
-  gl.bindVertexArray(null);
-  return { vao, count: n };
-})();
-
-/* nodes: centred quad, instanced once per node */
-const NODES = (() => {
-  const n = NET.nodes.length;
-  const pos = new Float32Array(n * 3), meta = new Float32Array(n * 2);
-  NET.nodes.forEach((v, i) => {
-    pos[i*3] = v.p[0]; pos[i*3+1] = v.p[1]; pos[i*3+2] = v.p[2];
-    meta[i*2] = v.seed; meta[i*2+1] = v.size;
-  });
-  const vao = baseQuad([-0.5,-0.5, 0.5,-0.5, -0.5,0.5, 0.5,0.5]);
-  instanceAttrib(1, pos, 3); instanceAttrib(2, meta, 2);
-  gl.bindVertexArray(null);
-  return { vao, count: n };
-})();
-
-const emptyVAO = gl.createVertexArray();
-
-/* ============================ render targets ============================ */
-const extF  = gl.getExtension("EXT_color_buffer_float");
-const extHF = gl.getExtension("EXT_color_buffer_half_float");
-const HDR = !!(extF || extHF);
-const CF = HDR ? gl.RGBA16F : gl.RGBA8;
-const CT = HDR ? (extF ? gl.FLOAT : gl.HALF_FLOAT) : gl.UNSIGNED_BYTE;
-
-function target(w, h) {
-  w = Math.max(2, w | 0); h = Math.max(2, h | 0);
-  const tex = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, tex);
-  gl.texImage2D(gl.TEXTURE_2D, 0, CF, w, h, 0, gl.RGBA, CT, null);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  const fb = gl.createFramebuffer();
-  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  return { fb, tex, w, h };
-}
-function drop(t) { if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); } }
-
-const MIPS = TIER ? 4 : 3;
-const T = { scene: null, mip: [] };
+/* ================================ sizing ================================ */
 let VW = 0, VH = 0, aspect = 1;
-
 function resize() {
   const cw = canvas.clientWidth || innerWidth, ch = canvas.clientHeight || innerHeight;
   let dpr = Math.min(devicePixelRatio || 1, TIER ? 1.70 : 1.40);
@@ -1134,19 +785,17 @@ function resize() {
   w = Math.max(2, w); h = Math.max(2, h);
   if (w === VW && h === VH) return;
   VW = w; VH = h; aspect = w / h;
-  canvas.width = w; canvas.height = h;
-  drop(T.scene); T.mip.forEach(drop);
-  T.scene = target(w, h);
-  T.mip = [];
-  for (let i = 0; i < MIPS; i++) T.mip.push(target(w >> (i+1), h >> (i+1)));
+  renderer.setPixelRatio(1);
+  renderer.setSize(w, h, false);
+  camera.aspect = aspect;
+  camera.updateProjectionMatrix();
 }
 
 /* ================================ camera ================================ */
-const mProj = M.create(), mView = M.create(), mVP = M.create();
-const eye = [0, 0, 26], tgt = [0, 0, 0];
-const right = [0,0,0], up = [0,0,0];
+const tgt = new THREE.Vector3(0, 0, 0);
 let clk = 0, lastMs = 0, raf = 0;
 let yawS = 0, pitS = 0;                       // smoothed pointer parallax
+let growS = 0;                                // smoothed ignite scale
 
 function render(dt) {
   const ig = STATE.ignite;
@@ -1156,114 +805,30 @@ function render(dt) {
   /* pointer parallax, smoothed, independent of scroll */
   yawS = damp(yawS, STATE.px, 3.2, dt);
   pitS = damp(pitS, STATE.py, 3.2, dt);
+  growS = damp(growS, modelReady ? ig : 0, 2.6, dt);
 
-  /* scroll orbits the lattice; a slow drift keeps it alive at rest */
+  /* scroll orbits the globe; a slow drift keeps it alive at rest */
   const yaw = -0.30 + s * 0.62 + Math.sin(clk * 0.050) * 0.045 + yawS * 0.115;
   const pit =  0.17 - s * 0.22 + Math.sin(clk * 0.037) * 0.028 + pitS * 0.090;
   const rad = lerp(19.5, 17.4, s) * (1 + narrow * 0.34);
-  tgt[0] = lerp(-1.4, 1.4, s);
-  tgt[1] = lerp( 0.5, -0.5, s);
-  eye[0] = tgt[0] + rad * Math.cos(pit) * Math.sin(yaw);
-  eye[1] = tgt[1] + rad * Math.sin(pit);
-  eye[2] = tgt[2] + rad * Math.cos(pit) * Math.cos(yaw);
+  tgt.x = lerp(-1.4, 1.4, s);
+  tgt.y = lerp( 0.5, -0.5, s);
+  camera.position.set(
+    tgt.x + rad * Math.cos(pit) * Math.sin(yaw),
+    tgt.y + rad * Math.sin(pit),
+    tgt.z + rad * Math.cos(pit) * Math.cos(yaw)
+  );
+  camera.fov = lerp(44, 52, narrow);
+  camera.updateProjectionMatrix();
+  camera.lookAt(tgt);
 
-  M.perspective(mProj, lerp(44, 52, narrow) * Math.PI / 180, aspect, 0.1, 160);
-  M.lookAt(mView, eye, tgt, [0, 1, 0]);
-  M.mul(mVP, mProj, mView);
-  right[0]=mView[0]; right[1]=mView[4]; right[2]=mView[8];
-  up[0]=mView[1];    up[1]=mView[5];    up[2]=mView[9];
+  globe.rotation.y = clk * 0.065;
+  globe.scale.setScalar(Math.max(0.001, growS));
+  sun.intensity  = 2.6 * (0.25 + 0.75 * ig);
+  rim.intensity  = 1.1 * (0.25 + 0.75 * ig);
+  hemi.intensity = 0.5 * (0.40 + 0.60 * ig);
 
-  /* ------------------------------ scene ------------------------------ */
-  gl.bindFramebuffer(gl.FRAMEBUFFER, T.scene.fb);
-  gl.viewport(0, 0, VW, VH);
-  gl.clearColor(0.008, 0.013, 0.024, 1);
-  gl.clear(gl.COLOR_BUFFER_BIT);
-  gl.disable(gl.DEPTH_TEST);                 // everything here is additive
-  gl.enable(gl.BLEND);
-  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-
-  /* connections — one instanced draw call */
-  gl.useProgram(P.link.p);
-  gl.uniformMatrix4fv(P.link.u.uVP, false, mVP);
-  gl.uniform1f(P.link.u.uAspect, aspect);
-  gl.uniform1f(P.link.u.uWidth, 0.0021);
-  gl.uniform1f(P.link.u.uTime, clk);
-  gl.uniform3f(P.link.u.uLine, 0.62, 0.72, 0.86);
-  gl.uniform3f(P.link.u.uPulse, 0.70, 0.93, 1.20);
-  gl.uniform1f(P.link.u.uAlpha, 0.50);
-  gl.uniform3fv(P.link.u.uCam, eye);
-  gl.uniform1f(P.link.u.uNear, 11.0);
-  gl.uniform1f(P.link.u.uFar, 34.0);
-  gl.uniform1f(P.link.u.uFade, ig);
-  gl.bindVertexArray(LINKS.vao);
-  gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, LINKS.count);
-
-  /* nodes — one instanced draw call */
-  gl.useProgram(P.node.p);
-  gl.uniformMatrix4fv(P.node.u.uVP, false, mVP);
-  gl.uniform3fv(P.node.u.uRight, right);
-  gl.uniform3fv(P.node.u.uUp, up);
-  gl.uniform1f(P.node.u.uTime, clk);
-  gl.uniform1f(P.node.u.uScale, 0.30);
-  gl.uniform3f(P.node.u.uCore, 0.86, 0.94, 1.00);
-  gl.uniform3f(P.node.u.uGlow, 0.10, 0.62, 1.00);
-  gl.uniform1f(P.node.u.uAlpha, 0.90);
-  gl.uniform3fv(P.node.u.uCam, eye);
-  gl.uniform1f(P.node.u.uNear, 11.0);
-  gl.uniform1f(P.node.u.uFar, 36.0);
-  gl.uniform1f(P.node.u.uFade, ig);
-  gl.bindVertexArray(NODES.vao);
-  gl.drawElementsInstanced(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0, NODES.count);
-
-  /* ------------------------------ bloom ------------------------------ */
-  gl.disable(gl.BLEND);
-  gl.bindVertexArray(emptyVAO);
-  const pass = (pr, dst) => {
-    gl.bindFramebuffer(gl.FRAMEBUFFER, dst ? dst.fb : null);
-    gl.viewport(0, 0, dst ? dst.w : VW, dst ? dst.h : VH);
-    gl.useProgram(pr.p);
-  };
-  const blit = () => gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-  pass(P.bright, T.mip[0]);
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T.scene.tex);
-  gl.uniform1i(P.bright.u.uTex, 0);
-  gl.uniform2f(P.bright.u.uTexel, 1/VW, 1/VH);
-  gl.uniform1f(P.bright.u.uThresh, HDR ? 0.30 : 0.20);
-  blit();
-
-  for (let i = 1; i < MIPS; i++) {
-    pass(P.down, T.mip[i]);
-    gl.uniform1i(P.down.u.uTex, 0);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T.mip[i-1].tex);
-    gl.uniform2f(P.down.u.uTexel, 1/T.mip[i-1].w, 1/T.mip[i-1].h);
-    blit();
-  }
-  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
-  for (let i = MIPS - 1; i > 0; i--) {
-    pass(P.up, T.mip[i-1]);
-    gl.uniform1i(P.up.u.uTex, 0);
-    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T.mip[i].tex);
-    gl.uniform2f(P.up.u.uTexel, 1/T.mip[i].w, 1/T.mip[i].h);
-    gl.uniform1f(P.up.u.uRadius, 1.15);
-    blit();
-  }
-  gl.disable(gl.BLEND);
-
-  /* ---------------------------- composite ---------------------------- */
-  pass(P.comp, null);
-  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T.scene.tex);
-  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, T.mip[0].tex);
-  gl.uniform1i(P.comp.u.uScene, 0);
-  gl.uniform1i(P.comp.u.uBloom, 1);
-  gl.uniform1f(P.comp.u.uBloomAmt, HDR ? 0.80 : 0.62);
-  gl.uniform1f(P.comp.u.uTime, clk);
-  gl.uniform1f(P.comp.u.uAspect, aspect);
-  gl.uniform1f(P.comp.u.uExposure, 1.28);
-  gl.uniform1f(P.comp.u.uVig, 0.52);
-  gl.uniform1f(P.comp.u.uFade, 1);
-  blit();
-  gl.bindVertexArray(null);
+  renderer.render(scene, camera);
 }
 
 /* ================================= loop ================================= */
